@@ -1,0 +1,9 @@
+----TRACKING CHANGES----
+
+1. In data_loader : 
+-> path jo daala hai in data_dirs, vahi daalna hai
+-> num_workers set to 4
+-> changed load_dataset_obj in /home/yogeshwar10/miniconda3/envs/avs/lib/python3.11/site-packages/trajdata/dataset_specific/nuplan/nuplan_dataset.py
+
+2. In simulation_interface :
+-> Corrected their top-level implementation script, as it had to passed as a StateArray object, so added StateArray.from_array() on it.

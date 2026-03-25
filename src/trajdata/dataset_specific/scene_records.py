@@ -62,3 +62,9 @@ class NuPlanSceneRecord(NamedTuple):
     split: str
     # desc: str
     data_idx: int
+
+
+class CommonRoadSceneRecord(NamedTuple):
+    name: str
+    length: str
+    data_idx: int
