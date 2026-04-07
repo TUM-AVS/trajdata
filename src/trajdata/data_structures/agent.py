@@ -11,6 +11,8 @@ class AgentType(IntEnum):
     PEDESTRIAN = 2
     BICYCLE = 3
     MOTORCYCLE = 4
+    TRUCK = 5
+    BUS = 6
 
 
 class Extent:

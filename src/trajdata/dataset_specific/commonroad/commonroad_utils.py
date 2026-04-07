@@ -2,12 +2,13 @@ import glob
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Final, Generator, Iterable, List, Optional, Tuple, Set
+from typing import  Final, Tuple
 
 import numpy as np
 import pandas as pd
 import yaml
-
+from scipy.signal import savgol_filter
+from scipy.interpolate import UnivariateSpline, splprep, splev
 from commonroad.common.file_reader  import CommonRoadFileReader
 try:
     from commonroad.scenario.scenario import Scenario
@@ -17,6 +18,7 @@ try:
     from commonroad.scenario.lanelet import Lanelet, LaneletNetwork, LaneletType
     from commonroad.common.file_reader  import CommonRoadFileReader
     from commonroad.planning.planning_problem import PlanningProblem
+    from commonroad.scenario.traffic_sign_interpreter import TrafficSignInterpreter
 except Exception:
     CommonRoadFileReader = None  # type: ignore
 
@@ -30,16 +32,19 @@ from trajdata.maps.vec_map_elements import (
     Polyline,
     RoadArea,
     RoadLane,
+    # RoadLaneWithSpeedLimit
 )
 from trajdata.utils import map_utils
 
-COMMONROAD_DT: Final[float] = 0.05
+COMMONROAD_DT: Final[float] = 0.1
 
 class CommonRoadScenarios:
     def __init__(self, data_dir: Path,) -> None:
 
         self.data_dir = Path(data_dir)
         self.scenario_files = list(self.data_dir.glob("*.xml"))
+        self.scenario_files = [f for f in self.scenario_files if CommonRoadFileReader(f).open()[0].dt == COMMONROAD_DT]          
+
         self.num_scenarios = len(self.scenario_files)
 
         if self.num_scenarios==0:
@@ -54,21 +59,11 @@ class CommonRoadScenarios:
     def get_scenario_length(self, idx: int) -> int:         #Commonroad has no fixed length of scenario, so we will take max time_step of prediction to be = scenario length
         """Calculate number of timesteps in scenario"""
         try:
-            scenario, _ = self.load_scenario(idx)
+            _, pps = self.load_scenario(idx)
+            planning_problem = list(pps.planning_problem_dict.values())[0]
             
             # Find the maximum timestep across all dynamic obstacles
-            max_timestep = 1
-            """
-            if scenario.dynamic_obstacles==[]:    #NOTE : No longer required hopefully, but this was for Handling case for no dynamic obstacles
-                max_timestep = 100
-                return max_timestep
-            """
-            
-            for obstacle in scenario.dynamic_obstacles:
-                final_timestep = obstacle.prediction.trajectory.final_state.time_step       #Final recorded time step of the scenario.
-                if final_timestep > max_timestep:
-                    max_timestep = final_timestep
-            # No need to add 1 because timesteps are 1-indexed (timestep 1, 2, ... max_timestep)
+            max_timestep = planning_problem.goal.state_list[0].time_step.end
             return max_timestep
             
         except Exception as e:
@@ -81,12 +76,18 @@ class CommonRoadScenarios:
         return scenario, planning_problem_set
 
 def translate_agent_type(agent_type : ObstacleType):           #Types here might need to be reviewed. Example, where to put ObstacleType.TRAIN? Also, ObstacleType.PARKED_VEHICLE i probably Static, but ok. Also, MOTORCYCLE goes into AgentType.BICYCLE or AgentType.VEHICLE?
-    if agent_type in {ObstacleType.CAR, ObstacleType.TRUCK, ObstacleType.PRIORITY_VEHICLE, ObstacleType.PARKED_VEHICLE, ObstacleType.TAXI, ObstacleType.BUS } :
+    if agent_type in {ObstacleType.CAR, ObstacleType.PRIORITY_VEHICLE, ObstacleType.PARKED_VEHICLE, ObstacleType.TAXI} :
         return AgentType.VEHICLE
+    elif agent_type == ObstacleType.TRUCK:
+        return AgentType.TRUCK
+    elif agent_type == ObstacleType.BUS:
+        return AgentType.BUS
     elif agent_type == ObstacleType.PEDESTRIAN:
         return AgentType.PEDESTRIAN
-    elif agent_type in {ObstacleType.BICYCLE, ObstacleType.MOTORCYCLE}:
+    elif agent_type == ObstacleType.BICYCLE:
         return AgentType.BICYCLE
+    elif agent_type == ObstacleType.MOTORCYCLE:
+        return AgentType.MOTORCYCLE
     elif agent_type == ObstacleType.UNKNOWN:
         return AgentType.UNKNOWN
     return AgentType.UNKNOWN
@@ -98,18 +99,32 @@ def pad_and_interpolate_array(data: np.ndarray, initial_ts_cr: int, final_ts_cr:
     data = np.pad(array=data,
            pad_width=((initial_ts_cr-1, len_scene_ts-final_ts_cr), (0,0)),
            mode='constant',
-           constant_values=np.nan,
+           constant_values=-1e8,
            )
     return data
 
 def extract_vectorized(
-    lanelet_network: LaneletNetwork, map_name: str, verbose: bool = False
+    lanelet_network: LaneletNetwork, country:str, map_name: str, verbose: bool = False
 ) -> VectorMap:
+    def _savgol_interp(point_array):
+        # smooth arrays
+        line = Polyline(point_array).interpolate(max_dist=3)
+        window = min(11, line.points.shape[0] if line.points.shape[0] % 2 == 1 else line.points.shape[0] - 1)
+        if window < 5:
+            return Polyline(point_array)
+        x = savgol_filter(line.points[:,0], window,3)
+        y = savgol_filter(line.points[:,1], window,3)
+        smoothed = np.column_stack([x, y])
+
+        # Force exact endpoint match to original geometry.
+        smoothed[0] = point_array[0, :2]
+        smoothed[-1] = point_array[-1, :2]
+        return Polyline(smoothed)
     
     vec_map = VectorMap(map_id=map_name)
     max_pt = np.array([np.nan, np.nan, np.nan])
     min_pt = np.array([np.nan, np.nan, np.nan])
-
+    speed_limit_interpreter = TrafficSignInterpreter(country, lanelet_network)
     for _, lanelet in enumerate(lanelet_network.lanelets) :
         
         elem_type = translate_lanelet_type(lanelet.lanelet_type)
@@ -159,16 +174,19 @@ def extract_vectorized(
             adj_lanes_right = {str(lanelet.adj_right)} if lanelet.adj_right is not None else set()
             next_lanes = {str(x) for x in lanelet.successor if x is not None}
             prev_lanes = {str(x) for x in lanelet.predecessor if x is not None}
-            road_lane= RoadLane(
+            speed_limit = speed_limit_interpreter.speed_limit((lanelet.lanelet_id,))
+            road_lane= RoadLane( #WithSpeedLimit(
                 id=str(lanelet.lanelet_id),
-                center=Polyline(lanelet.center_vertices),        #lanelet.left_vertices has only x and y dimensions btw, but not an issue. Polyline handles it during initialization.
-                left_edge=Polyline(lanelet.left_vertices),
-                right_edge=Polyline(lanelet.right_vertices),
+                # speed_limit=speed_limit,
+                center=_savgol_interp(lanelet.center_vertices),       
+                left_edge=_savgol_interp(lanelet.left_vertices),
+                right_edge=_savgol_interp(lanelet.right_vertices),
                 adj_lanes_left=adj_lanes_left,
                 adj_lanes_right=adj_lanes_right,
                 next_lanes=next_lanes,
                 prev_lanes=prev_lanes,                
             )
+
             #Calulate max_pt and min pt too while we're at it.
             max_pt = np.fmax(max_pt, road_lane.center.xyz.max(axis=0))
             min_pt = np.fmin(min_pt, road_lane.center.xyz.min(axis=0))
@@ -182,6 +200,8 @@ def extract_vectorized(
             vec_map.add_map_element(road_lane)      #add the element to vec_map
 
     vec_map.extent = np.concatenate((min_pt, max_pt))
+    if MapElementType.ROAD_LANE in vec_map.elements:
+        vec_map.lanes = list(vec_map.elements[MapElementType.ROAD_LANE].values())
     #Now do something about bounding box
 
     return vec_map

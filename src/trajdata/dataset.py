@@ -314,6 +314,12 @@ class UnifiedDataset(Dataset):
                         )
                     ):
                         # Use only rank 0 process for caching when using multi-GPU torch training.
+                        maps_dir = self.cache_class.get_maps_path(self.cache_path, env.name)
+                        if maps_dir.exists():
+                            import shutil
+                            shutil.rmtree(maps_dir)
+                            if verbose:
+                                print(f"Cleared old maps cache at {maps_dir}")
                         if rank == 0:
                             env.cache_maps(
                                 self.cache_path,

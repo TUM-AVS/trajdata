@@ -46,12 +46,15 @@ class CommonRoadDataset(RawDataset):
     def compute_metadata(self, env_name: str, data_dir: str)-> EnvMetadata:
         dataset_parts = [(env_name,)]                    #As we have no parts (categories) as such. Lets just fill it with env_name then.
         scene_split_map = defaultdict(partial(const_lambda, const_val = "commonroad"))         #As we have no splits within our parts either
+        map_locations = [f.stem for f in Path(data_dir).glob("*.xml")]
+        """Get timeStepSize for all scenario files"""
         return EnvMetadata(
             name = env_name,
             data_dir=data_dir,
             dt = commonroad_utils.COMMONROAD_DT,
             parts=dataset_parts,
             scene_split_map=scene_split_map,
+            map_locations=map_locations
         )
 
     def load_dataset_obj(self, verbose = False) -> None:
@@ -117,7 +120,7 @@ class CommonRoadDataset(RawDataset):
         return Scene(
             env_metadata=self.metadata,
             name=name,
-            location=f"{self.name}_{data_idx}",            #NOTE : Can add this later on.
+            location=scene_name,          
             data_split=scene_split,
             length_timesteps=scene_length,
             raw_data_idx=data_idx, 
@@ -142,7 +145,7 @@ class CommonRoadDataset(RawDataset):
                 scene_metadata = Scene(                                         #Called scene_metadata as Scene class holds info about the scene, not the literal data inside it. And ig SceneMetadata class is an even more lightweight version, probably for caching and referring to Scene.
                     env_metadata=self.metadata,
                     name=scene_name,
-                    location=f"{self.name}_{data_idx}",                         #NOTE : Can be set as something else if Commonroad associates scenes with locations. Not sure what effect/significance this paramater has on the code itself however. 
+                    location=scene_name,                         #NOTE : Can be set as something else if Commonroad associates scenes with locations. Not sure what effect/significance this paramater has on the code itself however. 
                     data_split=scene_split, 
                     length_timesteps=scene_length,
                     raw_data_idx=data_idx,
@@ -161,15 +164,15 @@ class CommonRoadDataset(RawDataset):
         ]
 
         scenario: Scenario
-        scenario, _ = self.dataset_obj.load_scenario(scene.raw_data_idx)
-
+        scenario, planning_problem_set = self.dataset_obj.load_scenario(scene.raw_data_idx)
+        planning_problem = list(planning_problem_set.planning_problem_dict.values())[0]
         #Used this print statement for debugging which scenes were problematic. Now they're removed though.
         #print(f"Entering Scene : {scene.name},  Data idx : {scene.raw_data_idx},  No. of dynamic obstacles : {len(scenario.dynamic_obstacles)}, No. of timesteps : {scene.length_timesteps}", flush=True)
 
         agent_ids = []
         all_agent_data = []
         agents_to_remove = []
-        ego_id = None               #NOTE : Not given any ego_id right now.
+        # ego_id = None               #NOTE : Not given any ego_id right now.
 
         for index, dynamic_obstacle in enumerate(scenario.dynamic_obstacles):
             if not check_obstacle_validity(dynamic_obstacle) :      #Ensuring that "obstacle" is valid
@@ -178,13 +181,13 @@ class CommonRoadDataset(RawDataset):
             agent_type: AgentType = translate_agent_type(dynamic_obstacle.obstacle_type)
             agent_id: int = dynamic_obstacle.obstacle_id
             agent_ids.append(agent_id)
-
+            ini_state = dynamic_obstacle.initial_state
             prediction : TrajectoryPrediction = dynamic_obstacle.prediction            #Represents the states at all timesteps, for current particular agent
 
-            translations = []
-            velocities = []
+            translations = [(ini_state.position[0], ini_state.position[1], 0)]         #Initializing the list with the initial state. Will be useful for padding and interpolation later on, in case of missing values at the beginning of the trajectory. Also, we will be dropping all rows with missing values in the end, so if we don't add this initial state here, then we might end up dropping the whole trajectory of an agent just because it is missing at t=0, which is a common case in commonroad as many agents appear after t=0.
+            velocities = [(np.cos(ini_state.orientation) * ini_state.velocity, np.sin(ini_state.orientation) * ini_state.velocity)]       #Same as above, initializing with the initial state velocity. Also, we can compute it from the initial state itself, so no problem of missing value at t=0 for velocity. But still adding it here for consistency and to avoid issues in padding and interpolation later on.
             #sizes = []     #Commonroad has Fixed Extents, so no need to store sizes in the cached dataframe. Waymo had it cuz it would vary slightly due to sensor error etc.
-            yaws = []
+            yaws = [ini_state.orientation]       #Same as above, initializing with the initial state yaw. Also, we can compute it from the initial state itself, so no problem of missing value at t=0 for yaw. But still adding it here for consistency and to avoid issues in padding and interpolation later on.
             
             trajectory: Trajectory = prediction.trajectory
             for state in trajectory.state_list:            #Key issue : This structure/code assumes that each "prediction" has exactly length = len_timesteps (of the given scene), and someone it is not active, then that state is represented by Null. Else, may have to write function to expand the length accordingly till t=0 (before the array) and t=lem_timestep(after the array). "state" here == at time=t
@@ -193,8 +196,10 @@ class CommonRoadDataset(RawDataset):
                     state : Union[PMState, KSState]
                     translations.append(
                         (state.position[0], state.position[1], 0)
-                        )                                        #NOTE : Check if commonroad uses z=0 or z=h/2
-                    velocities.append((state.velocity, state.velocity_y))
+                        )                
+                    vx = np.cos(state.orientation) * state.velocity   
+                    vy = np.sin(state.orientation) * state.velocity         
+                    velocities.append((vx, vy))
                     yaws.append(state.orientation)
                     #sizes.append((dynamic_obstacle.obstacle_shape.length, dynamic_obstacle.obstacle_shape.width, 0))
                     
@@ -221,9 +226,9 @@ class CommonRoadDataset(RawDataset):
             all_agent_data.append(curr_agent_data)
             first_timestep = pd.Series(curr_agent_data[:, 0]).first_valid_index()
             last_timestep = pd.Series(curr_agent_data[:, 0]).last_valid_index()
-            if first_timestep is None or last_timestep is None :
-                first_timestep=0
-                last_timestep=0
+            # if first_timestep is None or last_timestep is None :
+            #     first_timestep=0
+            #     last_timestep=0
             
             agent_name = str(agent_id)
             #insert something to recognize ego vehicle separately (thru its ID maybe) and then give name = "ego"
@@ -237,15 +242,119 @@ class CommonRoadDataset(RawDataset):
                 extent=extent,
             )
 
-            if last_timestep-first_timestep>0 :
-                agent_list.append(agent_info)
-                for timestep in range(first_timestep, last_timestep+1):         #NOTE : trajdata uses indexing of timesteps from 0 to n-1, but commonroad uses timesteps from 1 to n. 
-                                                                                # But it isnt causing any issue over here, as commonroad's timesteps isn't really being used anywhere except for length_scene, where it eitherways is handled properly. 
-                                                                                # Probably will still need that while expanding the length of dynamic_obstacle's timesteps to match that of the scene. 
-                    agent_presence[timestep].append(agent_info)         #agent_presence = List of timesteps. Each index pe gonna list all agents that are active at that timestep.
-            else :
-                agents_to_remove.append(agent_id)                       #Will drop these agents if they appeaared for just 1 (or 0) timestep. Will do it in the end after creating dataframe etc.
+            # if last_timestep-first_timestep>0 :
+            agent_list.append(agent_info)
+            for timestep in range(first_timestep, last_timestep):         
+                agent_presence[timestep].append(agent_info)         #agent_presence = List of timesteps. Each index pe gonna list all agents that are active at that timestep.
+            # else :
+            #     agents_to_remove.append(agent_id)                       #Will drop these agents if they appeaared for just 1 (or 0) timestep. Will do it in the end after creating dataframe etc.
+        
+        #### EGO 
+        import commonroad_velocity_planner.fast_api  as cvp_fast_api
+        from scipy.interpolate import interp1d, PchipInterpolator
 
+        global_trajectory = cvp_fast_api.global_trajectory_from_scenario_and_planning_problem(
+                scenario=scenario, 
+                planning_problem=planning_problem, 
+                use_regulatory_elements=False
+            )
+        idx = global_trajectory.get_closest_idx(np.array(planning_problem.initial_state.position)) 
+        
+        # goal_pos = planning_problem.goal.state_list[0].position.shapes[0].center
+        # goal_pos = np.array([10,18])
+        # idx2 = global_trajectory.get_closest_idx(goal_pos)
+
+        # s_values = global_trajectory.path_length_per_point[idx:idx2]
+        vs = global_trajectory.velocity_profile[idx:]
+        interpoint_distance = global_trajectory.interpoint_distance[idx:]
+        time_deltas = interpoint_distance / np.maximum(vs, 0.01)  # Avoid division by zero
+        time_at_points = np.concatenate([[0.0], np.cumsum(time_deltas)])[:-1]
+        
+        # Step 2: Create cubic spline interpolations from time to state
+        positions_x = global_trajectory.reference_path[idx:, 0]
+        positions_y = global_trajectory.reference_path[idx:, 1]
+        headings = global_trajectory.path_orientation[idx:]
+
+        interp_x = PchipInterpolator(time_at_points, positions_x)
+        interp_y = PchipInterpolator(time_at_points, positions_y)
+        interp_heading = PchipInterpolator(time_at_points, headings)
+        interp_velocity = PchipInterpolator(time_at_points, vs)
+        
+        
+
+        time_samples = np.arange(scene.length_timesteps+1) * scenario.dt
+        # time_samples = np.arange(0,np.floor(time_at_points[-1])+0.1,0.1)
+        sampled_positions = np.column_stack([
+            interp_x(time_samples),
+            interp_y(time_samples),
+        ])
+        sampled_headings = interp_heading(time_samples)
+        sampled_velocities = interp_velocity(time_samples)
+        # Compute velocity components from heading and speed
+        vx = sampled_velocities * np.cos(sampled_headings)
+        vy = sampled_velocities * np.sin(sampled_headings)
+
+        # pos_interp_x = interp1d(s_values, global_trajectory.reference_path[:, 0], kind='cubic', fill_value='extrapolate')
+        # pos_interp_y = interp1d(s_values, global_trajectory.reference_path[:, 1], kind='cubic', fill_value='extrapolate')
+        # heading_interp = interp1d(s_values, global_trajectory.path_orientation, kind='cubic', fill_value='extrapolate')
+        # velocity_interp = interp1d(s_values, global_trajectory.velocity_profile, kind='cubic', fill_value='extrapolate')
+
+        # positions = []
+        # headings = []
+        # velocities = []
+        # for ts in range(scene.length_timesteps+1):          #Adding +1 to include the last timestep as well, as range is exclusive of the end value. This is important for us as we want to have the reference trajectory values for all timesteps of the scene, including the last one.
+        #     t = ts * scenario.dt
+        #     s = t * global_trajectory.average_velocity  # arc length from time
+        #     positions.append((pos_interp_x(s), pos_interp_y(s),0))
+        #     heading = heading_interp(s)
+        #     headings.append(heading)
+        #     v = velocity_interp(s)
+        #     vx = np.cos(heading) * v  
+        #     vy = np.sin(heading) * v         
+        #     velocities.append((vx, vy))
+
+        curr_agent_data = np.concatenate(                   #Check validity of concantenation after implemmenations too pls
+            (
+                sampled_positions, 
+                np.expand_dims(np.zeros_like(sampled_positions[:, 0]), axis=1),  
+                np.column_stack([vx, vy]), 
+                np.expand_dims(sampled_headings, axis=1),               #just changes shape from (T,) to (T,1). thus makes it 2D array from a List (which is always 1D, as lists dont have concept of matrices), for concatenation.
+                #sizes,
+            ),
+            axis=1,
+        )
+
+        # curr_agent_data = pad_and_interpolate_array(curr_agent_data, trajectory.initial_time_step, trajectory.final_state.time_step, scene.length_timesteps)            #To fill "Internal" missing values. Note that the size our data is len_timesteps only, for each column. We will drop columns in the last aftter converting to dataframe.
+
+        all_agent_data.append(curr_agent_data)
+        first_timestep = pd.Series(curr_agent_data[:, 0]).first_valid_index()
+        last_timestep = pd.Series(curr_agent_data[:, 0]).last_valid_index()
+        # if first_timestep is None or last_timestep is None :
+        #     first_timestep=0
+        #     last_timestep=0
+        
+        agent_name = "ego"
+        agent_ids.append(agent_name)
+        #insert something to recognize ego vehicle separately (thru its ID maybe) and then give name = "ego"
+
+        extent = FixedExtent(4, 2, 0)     # Dummy Size of Ego
+        agent_info = AgentMetadata(
+            name=agent_name,
+            agent_type=AgentType.VEHICLE,
+            first_timestep=first_timestep,
+            last_timestep=last_timestep,
+            extent=extent,
+        )
+
+        # if last_timestep-first_timestep>0 :
+        agent_list.append(agent_info)
+        for timestep in range(first_timestep, last_timestep):         
+            try:
+                agent_presence[timestep].append(agent_info) 
+            except IndexError:
+                agent_presence.append([agent_info])
+
+        ######## 
         traj_cols = ["x", "y", "z", "vx", "vy", "heading"]
 
         """
@@ -262,44 +371,41 @@ class CommonRoadDataset(RawDataset):
         """    
             
     
-        agent_ids = np.repeat(agent_ids, scene.length_timesteps)    
+        agent_ids_ext = np.repeat(agent_ids, len(agent_presence)+1) # scene.length_timesteps+1)    
         #extent_cols = ["length", "width", "height"]    
         agent_frame_ids = np.resize(
-            np.arange(scene.length_timesteps),
-            len(agent_ids),                         #As length of agent_ids will be no. of VALID obstacles*scene_ts
+            np.arange(len(agent_presence)+1), #scene.length_timesteps+1),
+            len(agent_ids_ext),                         #As length of agent_ids will be no. of VALID obstacles*scene_ts
         )
 
         all_agent_data_df = pd.DataFrame(
             np.concatenate(all_agent_data), 
             columns = traj_cols, #+extent_cols,
-            index = [agent_ids, agent_frame_ids],
+            index = [agent_ids_ext, agent_frame_ids],
         )
-        mask = pd.notna(all_agent_data_df).all(axis=1, bool_only=False)
-        all_agent_data_df=all_agent_data_df.loc[mask]           #removing rows with ANY missing value.
+        # mask = pd.notna(all_agent_data_df).all(axis=1, bool_only=False)
+        # all_agent_data_df=all_agent_data_df.loc[mask]           #removing rows with ANY missing value.
 
 
         all_agent_data_df.index.names = ["agent_id", "scene_ts"]
         all_agent_data_df.sort_index(inplace=True)
         all_agent_data_df.reset_index(level=1, inplace=True)    #Removed scene_ts from indices to operate with it etc.
             
-        #print(f"agent_ids is \n{agent_ids.shape}\n{agent_ids}", flush=True)
-        #print(f"agent_frame_ids is \n{agent_frame_ids.shape}\n{agent_frame_ids}", flush=True)
-        #print(f"all_agent_data is \n{all_agent_data.__len__()}\n{all_agent_data}", flush=True)
-        #print(f"all_agent_data[0] is \n{all_agent_data[0]}", flush=True)
 
-        try : 
-            all_agent_data_df[["ax", "ay"]] = (
-                arr_utils.agent_aware_diff(
-                    all_agent_data_df[["vx", "vy"]].to_numpy(), agent_ids[mask]
-                )
-                / commonroad_utils.COMMONROAD_DT
+        # try : 
+        all_agent_data_df[["ax", "ay"]] = (
+            arr_utils.agent_aware_diff(
+                all_agent_data_df[["vx", "vy"]].to_numpy(), agent_ids#[mask]
             )
+            / commonroad_utils.COMMONROAD_DT
+        )
+        #TODO : ax, ay to large at first timestep
 
-        except IndexError as e :
-            print(e, flush=True)
-            print(f"All agent data : {all_agent_data.__len__()} \n{all_agent_data}", flush=True)
-            print(f"All agent data df : {all_agent_data_df.shape} \n{all_agent_data_df}", flush=True)
-            print(f"This error happened in Scene : {scene.name},  Data idx : {scene.raw_data_idx},  No. of dynamic obstacles : {len(scenario.dynamic_obstacles)}, No. of timesteps : {scene.length_timesteps}", flush=True)
+        # except IndexError as e :
+        #     print(e, flush=True)
+        #     print(f"All agent data : {all_agent_data.__len__()} \n{all_agent_data}", flush=True)
+        #     print(f"All agent data df : {all_agent_data_df.shape} \n{all_agent_data_df}", flush=True)
+        #     print(f"This error happened in Scene : {scene.name},  Data idx : {scene.raw_data_idx},  No. of dynamic obstacles : {len(scenario.dynamic_obstacles)}, No. of timesteps : {scene.length_timesteps}", flush=True)
             
 
         final_cols = [
@@ -316,13 +422,11 @@ class CommonRoadDataset(RawDataset):
         # Removing agents with only one detection.
         all_agent_data_df.drop(index=agents_to_remove, inplace=True)
 
-        # Changing the agent_id dtype to str
-        all_agent_data_df.reset_index(inplace=True)                                 #Again, this time removed agent_ids from index to change type to str etc.
-        all_agent_data_df["agent_id"] = all_agent_data_df["agent_id"].astype(str)
-        all_agent_data_df.set_index(["agent_id", "scene_ts"], inplace=True)         #set them as indices again after the cleaning etc.
-        all_agent_data_df.rename(
-            index={str(ego_id): "ego"}, inplace=True, level="agent_id"              #set ego_id as "ego" instead, convinient for usage later on and maybe even important for trajdata
-        )
+        # Changing the agent_id dtype to str and renaming ego
+        all_agent_data_df.reset_index(inplace=True)
+        all_agent_data_df['agent_id'] = all_agent_data_df['agent_id'].astype(str)
+                                        #   .replace(str(ego_id), 'ego'))
+        all_agent_data_df.set_index(['agent_id', 'scene_ts'], inplace=True)
         
         cache_class.save_agent_data(
             all_agent_data_df.loc[:, final_cols],
@@ -331,6 +435,10 @@ class CommonRoadDataset(RawDataset):
         )
 
         #---Insert code here for traffic data caching if u want later---
+        # TODO Traffic lights!
+        if len(scenario.lanelet_network.traffic_lights) > 0:
+            print(f"Scene {scene.name} has traffic lights, which are currently not handled in caching. Consider implementing this if you want to use this data for traffic light related research questions.", flush=True)
+            pass
 
         return agent_list, agent_presence
         
@@ -344,8 +452,8 @@ class CommonRoadDataset(RawDataset):
         scenario: Scenario
         scenario, _ = self.dataset_obj.load_scenario(data_idx)
         vector_map: VectorMap = commonroad_utils.extract_vectorized(
-            lanelet_network=scenario.lanelet_network,
-            map_name=f"{self.name}:{self.name}_{data_idx}",
+            lanelet_network=scenario.lanelet_network, country = scenario.scenario_id.country_name,
+            map_name=f"{self.name}:{str(scenario.scenario_id)}",
         )
         map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
 

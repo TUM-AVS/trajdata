@@ -152,6 +152,11 @@ class RoadLane(MapElement):
         return self.adj_lanes_left | self.adj_lanes_right | self.next_lanes
 
 
+# Extend RoadLane with speed_limit
+# @dataclass
+# class RoadLaneWithSpeedLimit(RoadLane):
+#     speed_limit: float = None #  m/s
+
 @dataclass
 class RoadArea(MapElement):
     exterior_polygon: Polyline
