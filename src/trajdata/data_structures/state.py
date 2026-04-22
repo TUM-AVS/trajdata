@@ -60,7 +60,7 @@ def lat_component(x, y, c, s):
     return -x * s + y * c
 
 
-def x_component(long, lat, c, s):
+def     x_component(long, lat, c, s):
     """
     Returns x component given long and lat components
     and cos and sin of heading
@@ -234,6 +234,7 @@ class State:
 
             # can't set this property since not all elements are part of format
             setter = None
+            
 
         return property(
             getter,

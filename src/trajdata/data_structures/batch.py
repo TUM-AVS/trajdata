@@ -97,6 +97,9 @@ class AgentBatch:
         )
 
         _filter = lambda tensor: tensor[filter_mask_dict[str(tensor.device)]]
+        _filter_state = lambda state: StateTensor.from_array(
+            _filter(state), format=state._format
+        )
         _filter_tensor_or_list = lambda tensor_or_list: (
             _filter(tensor_or_list)
             if isinstance(tensor_or_list, torch.Tensor)
@@ -115,22 +118,24 @@ class AgentBatch:
             dt=_filter(self.dt),
             agent_name=_filter_tensor_or_list(self.agent_name),
             agent_type=_filter(self.agent_type),
-            curr_agent_state=_filter(self.curr_agent_state),
-            agent_hist=_filter(self.agent_hist),
+            curr_agent_state=_filter_state(self.curr_agent_state),
+            agent_hist=_filter_state(self.agent_hist),
             agent_hist_extent=_filter(self.agent_hist_extent),
             agent_hist_len=_filter(self.agent_hist_len),
-            agent_fut=_filter(self.agent_fut),
+            agent_fut=_filter_state(self.agent_fut),
             agent_fut_extent=_filter(self.agent_fut_extent),
             agent_fut_len=_filter(self.agent_fut_len),
             num_neigh=_filter(self.num_neigh),
             neigh_types=_filter(self.neigh_types),
-            neigh_hist=_filter(self.neigh_hist),
+            neigh_hist=_filter_state(self.neigh_hist),
             neigh_hist_extents=_filter(self.neigh_hist_extents),
             neigh_hist_len=_filter(self.neigh_hist_len),
-            neigh_fut=_filter(self.neigh_fut),
+            neigh_fut=_filter_state(self.neigh_fut),
             neigh_fut_extents=_filter(self.neigh_fut_extents),
             neigh_fut_len=_filter(self.neigh_fut_len),
-            robot_fut=_filter(self.robot_fut) if self.robot_fut is not None else None,
+            robot_fut=_filter_state(self.robot_fut)
+            if self.robot_fut is not None
+            else None,
             robot_fut_len=_filter(self.robot_fut_len)
             if self.robot_fut_len is not None
             else None,
