@@ -146,7 +146,8 @@ class AgentBatch:
             maps_resolution=_filter(self.maps_resolution)
             if self.maps_resolution is not None
             else None,
-            vector_maps=_filter(self.vector_maps)
+            # vector_maps=_filter(self.vector_maps)
+            vector_maps=self.vector_maps
             if self.vector_maps is not None
             else None,
             rasters_from_world_tf=_filter(self.rasters_from_world_tf)

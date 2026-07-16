@@ -67,7 +67,6 @@ class VectorMap:
         self.elements[map_elem.elem_type][map_elem.id] = map_elem
 
     def compute_search_indices(self) -> None:
-        # TODO(bivanovic@nvidia.com): merge tree dicts?
         self.search_kdtrees = {MapElementType.ROAD_LANE: LaneCenterKDTree(self)}
         self.search_rtrees = {
             elem_type: MapElementSTRTree(self, elem_type)

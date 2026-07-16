@@ -59,13 +59,26 @@ class CommonRoadScenarios:
     def get_scenario_length(self, idx: int) -> int:         #Commonroad has no fixed length of scenario, so we will take max time_step of prediction to be = scenario length
         """Calculate number of timesteps in scenario"""
         try:
-            _, pps = self.load_scenario(idx)
+            scenario, pps = self.load_scenario(idx)
             planning_problem = list(pps.planning_problem_dict.values())[0]
-            
-            # Find the maximum timestep across all dynamic obstacles
-            max_timestep = planning_problem.goal.state_list[0].time_step.end
-            return max_timestep
-            
+
+            max_timestep = int(planning_problem.goal.state_list[0].time_step.end)
+
+            import commonroad_velocity_planner.fast_api as cvp_fast_api
+
+            global_trajectory = cvp_fast_api.global_trajectory_from_scenario_and_planning_problem(
+                scenario=scenario,
+                planning_problem=planning_problem,
+                use_regulatory_elements=False,
+            )
+            start_idx = global_trajectory.get_closest_idx(np.array(planning_problem.initial_state.position))
+            velocities = np.asarray(global_trajectory.velocity_profile[start_idx:], dtype=np.float64)
+            interpoint_distance = np.asarray(global_trajectory.interpoint_distance[start_idx:], dtype=np.float64)
+            total_duration_s = float(np.sum(interpoint_distance / np.maximum(velocities, 0.01)))
+            ego_route_steps = int(np.floor(total_duration_s / COMMONROAD_DT)) + 1
+
+            return max(max_timestep, ego_route_steps)
+
         except Exception as e:
             print(f"Error calculating length for scenario {idx}: {e}")
             return 1  # Return minimum length to avoid crashes
@@ -137,8 +150,8 @@ def extract_vectorized(
                 id=str(lanelet.lanelet_id),
                 polygon=polygon,
                 )
-            max_pt = np.fmax(max_pt, crosswalk.center.xyz.max(axis=0))
-            min_pt = np.fmin(min_pt, crosswalk.center.xyz.min(axis=0))
+            max_pt = np.fmax(max_pt, crosswalk.polygon.xyz.max(axis=0))
+            min_pt = np.fmin(min_pt, crosswalk.polygon.xyz.min(axis=0))
             vec_map.add_map_element(crosswalk)
 
         elif elem_type==MapElementType.PED_WALKWAY:
@@ -149,8 +162,8 @@ def extract_vectorized(
                 id=str(lanelet.lanelet_id),
                 polygon=polygon,
                 )
-            max_pt = np.fmax(max_pt, walkway.center.xyz.max(axis=0))
-            min_pt = np.fmin(min_pt, walkway.center.xyz.min(axis=0))
+            max_pt = np.fmax(max_pt, walkway.polygon.xyz.max(axis=0))
+            min_pt = np.fmin(min_pt, walkway.polygon.xyz.min(axis=0))
             vec_map.add_map_element(walkway)
         
         elif elem_type==MapElementType.ROAD_AREA:
@@ -177,7 +190,7 @@ def extract_vectorized(
             speed_limit = speed_limit_interpreter.speed_limit((lanelet.lanelet_id,))
             road_lane= RoadLane( #WithSpeedLimit(
                 id=str(lanelet.lanelet_id),
-                # speed_limit=speed_limit,
+                
                 center=_savgol_interp(lanelet.center_vertices),       
                 left_edge=_savgol_interp(lanelet.left_vertices),
                 right_edge=_savgol_interp(lanelet.right_vertices),
@@ -186,7 +199,7 @@ def extract_vectorized(
                 next_lanes=next_lanes,
                 prev_lanes=prev_lanes,                
             )
-
+            road_lane.speed_limit = speed_limit
             #Calulate max_pt and min pt too while we're at it.
             max_pt = np.fmax(max_pt, road_lane.center.xyz.max(axis=0))
             min_pt = np.fmin(min_pt, road_lane.center.xyz.min(axis=0))
@@ -207,7 +220,7 @@ def extract_vectorized(
     return vec_map
 
 
-def translate_lanelet_type(lanelet_type: Set[LaneletType]) -> MapElementType:
+def translate_lanelet_type(lanelet_type: set[LaneletType]) -> MapElementType:
     if LaneletType.CROSSWALK in lanelet_type :
         return MapElementType.PED_CROSSWALK
     elif LaneletType.SIDEWALK in lanelet_type :

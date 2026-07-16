@@ -259,37 +259,32 @@ class CommonRoadDataset(RawDataset):
                 use_regulatory_elements=False
             )
         idx = global_trajectory.get_closest_idx(np.array(planning_problem.initial_state.position)) 
-        
-        # goal_pos = planning_problem.goal.state_list[0].position.shapes[0].center
-        # goal_pos = np.array([10,18])
-        # idx2 = global_trajectory.get_closest_idx(goal_pos)
 
-        # s_values = global_trajectory.path_length_per_point[idx:idx2]
-        vs = global_trajectory.velocity_profile[idx:]
-        interpoint_distance = global_trajectory.interpoint_distance[idx:]
-        time_deltas = interpoint_distance / np.maximum(vs, 0.01)  # Avoid division by zero
+        vs = np.asarray(global_trajectory.velocity_profile[idx:], dtype=np.float64)
+        interpoint_distance = np.asarray(global_trajectory.interpoint_distance[idx:], dtype=np.float64)
+        time_deltas = interpoint_distance / np.maximum(vs, 0.01)
         time_at_points = np.concatenate([[0.0], np.cumsum(time_deltas)])[:-1]
-        
-        # Step 2: Create cubic spline interpolations from time to state
-        positions_x = global_trajectory.reference_path[idx:, 0]
-        positions_y = global_trajectory.reference_path[idx:, 1]
-        headings = global_trajectory.path_orientation[idx:]
 
-        interp_x = PchipInterpolator(time_at_points, positions_x)
-        interp_y = PchipInterpolator(time_at_points, positions_y)
-        interp_heading = PchipInterpolator(time_at_points, headings)
-        interp_velocity = PchipInterpolator(time_at_points, vs)
-        
-        
+        positions_x = np.asarray(global_trajectory.reference_path[idx:, 0], dtype=np.float64)
+        positions_y = np.asarray(global_trajectory.reference_path[idx:, 1], dtype=np.float64)
+        headings = np.unwrap(np.asarray(global_trajectory.path_orientation[idx:], dtype=np.float64))
 
-        time_samples = np.arange(scene.length_timesteps+1) * scenario.dt
-        # time_samples = np.arange(0,np.floor(time_at_points[-1])+0.1,0.1)
+        interp_x = PchipInterpolator(time_at_points, positions_x, extrapolate=False)
+        interp_y = PchipInterpolator(time_at_points, positions_y, extrapolate=False)
+        interp_heading = PchipInterpolator(time_at_points, headings, extrapolate=False)
+        interp_velocity = PchipInterpolator(time_at_points, vs, extrapolate=False)
+
+        full_duration = float(time_at_points[-1]) if time_at_points.size > 0 else 0.0
+        scene_length_timesteps = max(scene.length_timesteps, int(np.floor(full_duration / scenario.dt)) + 1)
+        time_samples = np.arange(scene_length_timesteps + 1, dtype=np.float64) * scenario.dt
+        clamped_time_samples = np.minimum(time_samples, full_duration)
+
         sampled_positions = np.column_stack([
-            interp_x(time_samples),
-            interp_y(time_samples),
+            interp_x(clamped_time_samples),
+            interp_y(clamped_time_samples),
         ])
-        sampled_headings = interp_heading(time_samples)
-        sampled_velocities = interp_velocity(time_samples)
+        sampled_headings = interp_heading(clamped_time_samples)
+        sampled_velocities = interp_velocity(clamped_time_samples)
         # Compute velocity components from heading and speed
         vx = sampled_velocities * np.cos(sampled_headings)
         vy = sampled_velocities * np.sin(sampled_headings)
