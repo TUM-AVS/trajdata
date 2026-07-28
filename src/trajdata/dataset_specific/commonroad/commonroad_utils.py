@@ -1,8 +1,9 @@
 import glob
+import json
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
-from typing import  Final, Tuple
+from typing import Any, Final, Tuple
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,7 @@ try:
     from commonroad.scenario.lanelet import Lanelet, LaneletNetwork, LaneletType
     from commonroad.common.file_reader  import CommonRoadFileReader
     from commonroad.planning.planning_problem import PlanningProblem
+    from commonroad.scenario.traffic_sign import SupportedTrafficSignCountry
     from commonroad.scenario.traffic_sign_interpreter import TrafficSignInterpreter
 except Exception:
     CommonRoadFileReader = None  # type: ignore
@@ -37,6 +39,66 @@ from trajdata.maps.vec_map_elements import (
 from trajdata.utils import map_utils
 
 COMMONROAD_DT: Final[float] = 0.1
+
+
+def commonroad_lane_metadata(scenario: Scenario) -> dict[str, dict[str, Any]]:
+    """Extract CommonRoad lane attributes omitted by the VectorMap proto."""
+    country = SupportedTrafficSignCountry(scenario.scenario_id.country_id)
+    interpreter = TrafficSignInterpreter(
+        country=country,
+        lanelet_network=scenario.lanelet_network,
+    )
+    metadata: dict[str, dict[str, Any]] = {}
+    for lanelet in scenario.lanelet_network.lanelets:
+        speed_limit = interpreter.speed_limit(frozenset({lanelet.lanelet_id}))
+        stop_line = None
+        if lanelet.stop_line is not None:
+            stop_line = {
+                "start": np.asarray(lanelet.stop_line.start, dtype=float).tolist(),
+                "end": np.asarray(lanelet.stop_line.end, dtype=float).tolist(),
+                "line_marking": lanelet.stop_line.line_marking.value,
+                "traffic_sign_ref": sorted(
+                    int(value) for value in (lanelet.stop_line.traffic_sign_ref or set())
+                ),
+                "traffic_light_ref": sorted(
+                    int(value) for value in (lanelet.stop_line.traffic_light_ref or set())
+                ),
+            }
+        metadata[str(lanelet.lanelet_id)] = {
+            "source": "commonroad",
+            "speed_limit_mps": None if speed_limit is None else float(speed_limit),
+            "lanelet_types": sorted(value.value for value in lanelet.lanelet_type),
+            "user_one_way": sorted(value.value for value in lanelet.user_one_way),
+            "user_bidirectional": sorted(value.value for value in lanelet.user_bidirectional),
+            "line_marking_left": lanelet.line_marking_left_vertices.value,
+            "line_marking_right": lanelet.line_marking_right_vertices.value,
+            "adj_left_same_direction": lanelet.adj_left_same_direction,
+            "adj_right_same_direction": lanelet.adj_right_same_direction,
+            "traffic_sign_ids": sorted(int(value) for value in lanelet.traffic_signs),
+            "traffic_light_ids": sorted(int(value) for value in lanelet.traffic_lights),
+            "stop_line": stop_line,
+        }
+    return metadata
+
+
+def write_vector_map_metadata(path: str | Path, metadata: dict[str, dict[str, Any]]) -> None:
+    Path(path).write_text(json.dumps(metadata, indent=2, sort_keys=True))
+
+
+def apply_vector_map_metadata(vector_map: VectorMap, path: str | Path) -> None:
+    """Restore CommonRoad source-map metadata after a VectorMap proto reload."""
+    metadata_path = Path(path)
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Vector-map metadata sidecar not found: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text())
+    for lane in vector_map.lanes:
+        lane_id = str(lane.id)
+        if lane_id not in metadata:
+            raise RuntimeError(
+                f"Vector-map metadata sidecar has no entry for lane {lane_id!r}."
+            )
+        lane.map_metadata = metadata[lane_id]
+        lane.speed_limit_mps = metadata[lane_id]["speed_limit_mps"]
 
 class CommonRoadScenarios:
     def __init__(self, data_dir: Path,) -> None:
@@ -271,4 +333,4 @@ def check_state_validity(state: State) -> bool:
         if isinstance(state, allowed_states):
             validity=True
 
-    return validity    
+    return validity
