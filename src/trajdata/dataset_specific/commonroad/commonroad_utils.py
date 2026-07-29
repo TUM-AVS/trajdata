@@ -25,6 +25,7 @@ except Exception:
     CommonRoadFileReader = None  # type: ignore
 
 from trajdata.data_structures.agent import AgentType
+from trajdata.caching.df_cache import DataFrameCache
 from trajdata.data_structures.scene_metadata import Scene
 from trajdata.maps import TrafficLightStatus, VectorMap
 from trajdata.maps.vec_map_elements import (
@@ -39,6 +40,81 @@ from trajdata.maps.vec_map_elements import (
 from trajdata.utils import map_utils
 
 COMMONROAD_DT: Final[float] = 0.1
+GOAL_METADATA_FILENAME: Final[str] = "commonroad_goal.json"
+GOAL_METADATA_VERSION: Final[int] = 1
+
+
+def _goal_time_interval(value: Any) -> dict[str, float]:
+    if hasattr(value, "start") and hasattr(value, "end"):
+        start, end = float(value.start), float(value.end)
+    elif isinstance(value, (int, np.integer)):
+        start = end = float(value)
+    else:
+        raise TypeError(f"Unsupported CommonRoad goal time type: {type(value).__name__}")
+    if not np.isfinite(start) or not np.isfinite(end) or end < start:
+        raise ValueError(f"Invalid CommonRoad goal time interval: {start}, {end}")
+    return {"start": start, "end": end}
+
+
+def serialize_goal(planning_problem: Any, source_dt_s: float) -> dict[str, Any]:
+    """Serialize CommonRoad's exact position/time termination alternatives."""
+    if source_dt_s <= 0.0 or not np.isfinite(source_dt_s):
+        raise ValueError(f"CommonRoad source dt must be positive, got {source_dt_s}")
+    conditions = []
+    for goal_state in planning_problem.goal.state_list:
+        attributes = set(goal_state.attributes)
+        position_wkb = None
+        if "position" in attributes and goal_state.position is not None:
+            shapes = getattr(goal_state.position, "shapes", [goal_state.position])
+            position_wkb = []
+            for shape in shapes:
+                if isinstance(shape, np.ndarray):
+                    xy = np.asarray(shape, dtype=float).reshape(-1)
+                    if xy.size != 2 or not np.all(np.isfinite(xy)):
+                        raise ValueError("CommonRoad point goal must be finite x,y")
+                    import shapely
+                    geometry = shapely.Point(*xy)
+                else:
+                    geometry = shape.shapely_object
+                if geometry.is_empty or not geometry.is_valid:
+                    raise ValueError("CommonRoad goal geometry is invalid")
+                import shapely
+                position_wkb.append(shapely.to_wkb(geometry, hex=True))
+        interval = (
+            _goal_time_interval(goal_state.time_step)
+            if "time_step" in attributes and goal_state.time_step is not None
+            else None
+        )
+        if position_wkb is None and interval is None:
+            raise ValueError("CommonRoad goal state has neither position nor time_step")
+        conditions.append({"position_wkb": position_wkb, "time_interval_steps": interval})
+    if not conditions:
+        raise ValueError("CommonRoad planning problem has no goal states")
+    return {"version": GOAL_METADATA_VERSION, "source_dt_s": float(source_dt_s), "conditions": conditions}
+
+
+def write_goal_metadata(
+    cache_path: Path, env_name: str, scene_name: str, planning_problem: Any, source_dt_s: float
+) -> dict[str, Any]:
+    metadata = serialize_goal(planning_problem, source_dt_s)
+    destination = DataFrameCache.scene_cache_dir(cache_path, env_name, scene_name) / GOAL_METADATA_FILENAME
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    return metadata
+
+
+def load_goal_metadata(scene_cache_dir: Path) -> dict[str, Any]:
+    source = Path(scene_cache_dir) / GOAL_METADATA_FILENAME
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"CommonRoad goal metadata is missing at {source}; rebuild the scene cache."
+        )
+    metadata = json.loads(source.read_text())
+    if metadata.get("version") != GOAL_METADATA_VERSION:
+        raise RuntimeError(
+            f"Unsupported CommonRoad goal metadata version: {metadata.get('version')!r}"
+        )
+    return metadata
 
 
 def commonroad_lane_metadata(scenario: Scenario) -> dict[str, dict[str, Any]]:

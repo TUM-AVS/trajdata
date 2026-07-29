@@ -3,7 +3,9 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import pandas as pd
+import dill
 from nuplan.common.maps.nuplan_map import map_factory
+from nuplan.common.maps.maps_datatypes import SemanticMapLayer
 from nuplan.common.maps.nuplan_map.nuplan_map import NuPlanMap
 from tqdm import tqdm
 
@@ -22,6 +24,8 @@ from trajdata.dataset_specific.nuplan import nuplan_utils
 from trajdata.dataset_specific.raw_dataset import RawDataset
 from trajdata.dataset_specific.scene_records import NuPlanSceneRecord
 from trajdata.maps.vec_map import VectorMap
+from trajdata.maps.vec_map_elements import MapElementType
+from trajdata.utils import map_utils
 from trajdata.utils import arr_utils
 
 
@@ -30,7 +34,7 @@ class NuplanDataset(RawDataset):
         all_log_splits: Dict[str, List[str]] = nuplan_utils.create_splits_logs()
 
         nup_log_splits: Dict[str, List[str]]
-        if env_name == "nuplan_mini":
+        if env_name.startswith("nuplan_mini"):
             nup_log_splits = {
                 k: all_log_splits[k[5:]]
                 for k in ["mini_train", "mini_val", "mini_test"]
@@ -58,6 +62,12 @@ class NuplanDataset(RawDataset):
             v_elem: k for k, v in nup_log_splits.items() for v_elem in v
         }
 
+        requested_locations = self.dataset_options.get("map_locations")
+        if requested_locations is not None:
+            requested_locations = tuple(str(value) for value in requested_locations)
+            unknown = set(requested_locations) - set(nuplan_utils.NUPLAN_LOCATIONS)
+            if unknown:
+                raise ValueError(f"Unknown nuPlan map locations: {sorted(unknown)}")
         return EnvMetadata(
             name=env_name,
             data_dir=data_dir,
@@ -66,14 +76,21 @@ class NuplanDataset(RawDataset):
             scene_split_map=nup_log_split_map,
             # The location names should match the map names used in
             # the unified data cache.
-            map_locations=nuplan_utils.NUPLAN_LOCATIONS,
+            map_locations=(
+                nuplan_utils.NUPLAN_LOCATIONS
+                if requested_locations is None
+                else requested_locations
+            ),
         )
 
     def load_dataset_obj(self, verbose: bool = False) -> None:
         if verbose:
             print(f"Loading {self.name} dataset...", flush=True)
 
-        if self.name == "nuplan_mini":
+        configured_subfolder = self.dataset_options.get("split_subfolder")
+        if configured_subfolder is not None:
+            subfolder = str(configured_subfolder)
+        elif self.name.startswith("nuplan_mini"):
             subfolder = "mini"
         elif self.name.startswith("nuplan"):
             subfolder = "trainval"
@@ -346,7 +363,54 @@ class NuplanDataset(RawDataset):
         overall_agents_df = pd.concat([ego_df, agents_df.reset_index()]).set_index(
             ["agent_id", "scene_ts"]
         )
+        metadata_path = cache_path / scene.env_name / "maps" / f"{scene.location}.metadata.json"
+        if not metadata_path.is_file():
+            raise FileNotFoundError(
+                f"nuPlan map metadata is missing at {metadata_path}; map caching must precede scene caching."
+            )
+        map_metadata = __import__("json").loads(metadata_path.read_text())
+        origins = {
+            tuple(value["coordinate_origin_xy"])
+            for value in map_metadata.values()
+            if value.get("coordinate_frame") == "map_local_v1"
+        }
+        if len(origins) != 1:
+            raise RuntimeError(f"nuPlan map metadata has no unique local origin: {metadata_path}")
+        origin_xy = np.asarray(next(iter(origins)), dtype=float)
+        overall_agents_df["x"] = overall_agents_df["x"].astype(float) - origin_xy[0]
+        overall_agents_df["y"] = overall_agents_df["y"].astype(float) - origin_xy[1]
         cache_class.save_agent_data(overall_agents_df, cache_path, scene)
+
+        goal_area = self.dataset_options.get("goal_area")
+        if goal_area is not None:
+            if "ego" not in overall_agents_df.index.get_level_values("agent_id"):
+                raise RuntimeError("nuPlan scene cache has no ego trajectory for goal creation.")
+            final_ego = overall_agents_df.xs("ego", level="agent_id").iloc[-1]
+            scene_cache_dir = cache_class.scene_cache_dir(cache_path, scene.env_name, scene.name)
+            vector_path = cache_path / scene.env_name / "maps" / f"{scene.location}.pb"
+            if not vector_path.is_file():
+                raise FileNotFoundError(f"nuPlan vector map is missing at {vector_path}")
+            vector_map = VectorMap.from_proto(map_utils.load_vector_map(vector_path))
+            position_geometry = nuplan_utils.create_goal_geometry(
+                vector_map,
+                {
+                    "x": float(final_ego["x"]),
+                    "y": float(final_ego["y"]),
+                    "heading": float(final_ego["heading"]),
+                },
+                float(goal_area["area_length_m"]),
+            )
+            nuplan_utils.write_goal_metadata(
+                scene_cache_dir,
+                {
+                    "x": float(final_ego["x"]),
+                    "y": float(final_ego["y"]),
+                    "heading": float(final_ego["heading"]),
+                },
+                goal_area,
+                int(float(goal_area["minimum_progress_ratio"]) * scene.length_timesteps),
+                position_geometry,
+            )
 
         # similar process to clean up and traffic light data
         tls_df["scene_ts"] = tls_df["lidar_pc_token"].map(
@@ -367,8 +431,11 @@ class NuplanDataset(RawDataset):
         map_cache_class: Type[SceneCache],
         map_params: Dict[str, Any],
     ) -> None:
+        map_root = self.dataset_options.get("map_root")
+        if map_root is None:
+            map_root = self.metadata.data_dir.parent / "maps"
         nuplan_map: NuPlanMap = map_factory.get_maps_api(
-            map_root=str(self.metadata.data_dir.parent / "maps"),
+            map_root=str(map_root),
             map_version=nuplan_utils.NUPLAN_MAP_VERSION,
             map_name=nuplan_utils.NUPLAN_FULL_MAP_NAME_DICT[map_name],
         )
@@ -389,8 +456,60 @@ class NuplanDataset(RawDataset):
 
         vector_map = VectorMap(map_id=f"{self.name}:{map_name}")
         nuplan_utils.populate_vector_map(vector_map, nuplan_map, lane_connector_idxs)
-
-        map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
+        vector_map.lanes = list(vector_map.elements[MapElementType.ROAD_LANE].values())
+        if not vector_map.lanes:
+            raise RuntimeError(f"nuPlan map {map_name!r} conversion produced no road lanes.")
+        origin_xy = np.floor(
+            np.min(np.concatenate([lane.center.xy for lane in vector_map.lanes]), axis=0) / 1000.0
+        ) * 1000.0
+        vector_map.extent[[0, 1]] -= origin_xy
+        vector_map.extent[[3, 4]] -= origin_xy
+        for element in vector_map.iter_elems():
+            polylines = (
+                [element.center, element.left_edge, element.right_edge]
+                if element.elem_type == MapElementType.ROAD_LANE
+                else [element.exterior_polygon, *element.interior_holes]
+                if element.elem_type == MapElementType.ROAD_AREA
+                else [element.polygon]
+            )
+            for polyline in polylines:
+                if polyline is not None:
+                    polyline.points[..., :2] -= origin_xy
+        metadata = {}
+        for lane in vector_map.lanes:
+            map_object = nuplan_map.get_map_object(str(lane.id), SemanticMapLayer.LANE)
+            object_type = "lane"
+            if map_object is None:
+                map_object = nuplan_map.get_map_object(str(lane.id), SemanticMapLayer.LANE_CONNECTOR)
+                object_type = "lane_connector"
+            if map_object is None:
+                raise RuntimeError(f"nuPlan map {map_name!r} has no lane object for {lane.id!r}.")
+            metadata[str(lane.id)] = {
+                "source": "nuplan",
+                "coordinate_frame": "map_local_v1",
+                "coordinate_origin_xy": origin_xy.tolist(),
+                "speed_limit_mps": map_object.speed_limit_mps,
+                "map_object_type": object_type,
+                "roadblock_id": map_object.get_roadblock_id(),
+                "has_traffic_lights": bool(map_object.has_traffic_lights()),
+                "stop_lines": [
+                    {"id": str(stop.id), "polygon": (np.asarray(stop.polygon.exterior.coords, dtype=float) - origin_xy).tolist()}
+                    for stop in map_object.stop_lines
+                ],
+                "incoming_edge_ids": sorted(edge.id for edge in map_object.incoming_edges),
+                "outgoing_edge_ids": sorted(edge.id for edge in map_object.outgoing_edges),
+            }
+        vector_map.compute_search_indices()
+        maps_path, vector_path, kdtrees_path, rtrees_path, _, _ = map_cache_class.get_map_paths(
+            cache_path, vector_map.env_name, vector_map.map_name, float(map_params["px_per_m"])
+        )
+        maps_path.mkdir(parents=True, exist_ok=True)
+        vector_path.write_bytes(vector_map.to_proto().SerializeToString())
+        with kdtrees_path.open("wb") as file:
+            dill.dump(vector_map.search_kdtrees, file)
+        with rtrees_path.open("wb") as file:
+            dill.dump(vector_map.search_rtrees, file)
+        nuplan_utils.write_vector_map_metadata(maps_path / f"{map_name}.metadata.json", metadata)
 
     def cache_maps(
         self,
@@ -402,7 +521,7 @@ class NuplanDataset(RawDataset):
         Stores rasterized maps to disk for later retrieval.
         """
         for map_name in tqdm(
-            nuplan_utils.NUPLAN_LOCATIONS,
+            self.metadata.map_locations,
             desc=f"Caching {self.name} Maps at {map_params['px_per_m']:.2f} px/m",
             position=0,
         ):

@@ -103,6 +103,7 @@ class UnifiedDataset(Dataset):
             # "lyft_val": "~/datasets/lyft/scenes/validate.zarr",
             # "nuplan_mini": "~/datasets/nuplan/dataset/nuplan-v1.1",
         },
+        dataset_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cache_type: str = "dataframe",
         cache_location: str = "~/.unified_data_cache",
         rebuild_cache: bool = False,
@@ -245,7 +246,9 @@ class UnifiedDataset(Dataset):
                 s.lower() for s in self.scene_description_contains
             ]
 
-        self.envs: List[RawDataset] = env_utils.get_raw_datasets(data_dirs)
+        self.envs: List[RawDataset] = env_utils.get_raw_datasets(
+            data_dirs, dataset_options
+        )
         self.envs_dict: Dict[str, RawDataset] = {env.name: env for env in self.envs}
 
         matching_datasets: List[SceneTag] = self._get_matching_scene_tags(desired_data)

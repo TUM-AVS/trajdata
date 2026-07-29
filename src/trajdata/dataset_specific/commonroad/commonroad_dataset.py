@@ -45,13 +45,15 @@ def const_lambda(const_val: Any) -> Any:
 class CommonRoadDataset(RawDataset):
     def compute_metadata(self, env_name: str, data_dir: str)-> EnvMetadata:
         dataset_parts = [(env_name,)]                    #As we have no parts (categories) as such. Lets just fill it with env_name then.
-        scene_split_map = defaultdict(partial(const_lambda, const_val = "commonroad"))         #As we have no splits within our parts either
+        # Each configured directory is an independent trajdata environment.  Use
+        # that name consistently for the scene tag, cached scene list, and map.
+        scene_split_map = defaultdict(partial(const_lambda, const_val=env_name))
         map_locations = [f.stem for f in Path(data_dir).glob("*.xml")]
         """Get timeStepSize for all scenario files"""
         return EnvMetadata(
             name = env_name,
             data_dir=data_dir,
-            dt = commonroad_utils.COMMONROAD_DT,
+            dt = float(self.dataset_options.get("desired_dt", commonroad_utils.COMMONROAD_DT)),
             parts=dataset_parts,
             scene_split_map=scene_split_map,
             map_locations=map_locations
@@ -445,10 +447,26 @@ class CommonRoadDataset(RawDataset):
         map_params: Dict[str, Any],
     ):
         scenario: Scenario
-        scenario, _ = self.dataset_obj.load_scenario(data_idx)
+        scenario, planning_problem_set = self.dataset_obj.load_scenario(data_idx)
+        planning_problem = next(iter(planning_problem_set.planning_problem_dict.values()))
+        map_name = self.dataset_obj.get_scenario_name(data_idx)
         vector_map: VectorMap = commonroad_utils.extract_vectorized(
             lanelet_network=scenario.lanelet_network, country = scenario.scenario_id.country_name,
-            map_name=f"{self.name}:{str(scenario.scenario_id)}",
+            map_name=f"{self.name}:{map_name}",
+        )
+        resolution = float(map_params["px_per_m"])
+        maps_path = map_cache_class.get_map_paths(cache_path, self.name, map_name, resolution)[0]
+        maps_path.mkdir(parents=True, exist_ok=True)
+        commonroad_utils.write_vector_map_metadata(
+            maps_path / f"{map_name}.metadata.json",
+            commonroad_utils.commonroad_lane_metadata(scenario),
+        )
+        commonroad_utils.write_goal_metadata(
+            cache_path,
+            self.name,
+            map_name,
+            planning_problem,
+            float(scenario.dt),
         )
         map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
 

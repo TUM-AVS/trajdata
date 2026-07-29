@@ -1,10 +1,12 @@
 import glob
+import json
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Final, Generator, Iterable, List, Optional, Tuple
 
 import numpy as np
+import shapely
 import nuplan.planning.script.config.common as common_cfg
 import pandas as pd
 import yaml
@@ -23,6 +25,92 @@ from trajdata.maps.vec_map_elements import (
     RoadLane,
 )
 from trajdata.utils import map_utils
+
+
+MAP_METADATA_FILENAME_SUFFIX: Final[str] = ".metadata.json"
+GOAL_METADATA_FILENAME: Final[str] = "nuplan_goal.json"
+GOAL_METADATA_VERSION: Final[int] = 1
+
+
+def write_vector_map_metadata(path: str | Path, metadata: dict[str, dict]) -> None:
+    Path(path).write_text(json.dumps(metadata, indent=2, sort_keys=True))
+
+
+def apply_vector_map_metadata(vector_map: VectorMap, path: str | Path) -> None:
+    metadata_path = Path(path)
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Vector-map metadata sidecar not found: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text())
+    for lane in vector_map.lanes:
+        lane_metadata = metadata.get(str(lane.id))
+        if lane_metadata is None:
+            raise RuntimeError(f"Vector-map metadata has no entry for lane {lane.id!r}")
+        lane.map_metadata = lane_metadata
+        lane.speed_limit_mps = lane_metadata.get("speed_limit_mps")
+
+
+def create_goal_geometry(vector_map: VectorMap, final_ego_state: dict[str, float], area_length_m: float):
+    """Construct the route-aligned synthetic nuPlan goal area in map-local coordinates."""
+    if area_length_m <= 0.0:
+        raise ValueError("nuPlan goal area length must be positive")
+    goal_xy = np.array([final_ego_state["x"], final_ego_state["y"]], dtype=float)
+    heading = float(final_ego_state["heading"])
+    candidates = []
+    for lane in vector_map.lanes:
+        if lane.left_edge is None or lane.right_edge is None:
+            continue
+        center_xy = np.asarray(lane.center.xy, dtype=float)
+        index = int(np.argmin(np.linalg.norm(center_xy - goal_xy, axis=1)))
+        width = float(np.linalg.norm(lane.left_edge.xy[index] - lane.right_edge.xy[index]))
+        distance = float(np.linalg.norm(center_xy[index] - goal_xy))
+        if width > 0.0 and distance <= 0.5 * width + 0.05:
+            candidates.append((distance, str(lane.id), width))
+    if not candidates:
+        raise RuntimeError(f"nuPlan goal point {goal_xy.tolist()} is outside converted road lanes")
+    _, _, width = min(candidates)
+    tangent = np.array([np.cos(heading), np.sin(heading)])
+    normal = np.array([-tangent[1], tangent[0]])
+    start = goal_xy - area_length_m * tangent
+    half_width = 0.5 * width
+    polygon = shapely.Polygon((
+        goal_xy + half_width * normal,
+        goal_xy - half_width * normal,
+        start - half_width * normal,
+        start + half_width * normal,
+    ))
+    if polygon.is_empty or not polygon.is_valid:
+        raise RuntimeError("nuPlan converter created an invalid goal polygon")
+    return polygon
+
+
+def write_goal_metadata(
+    scene_cache_dir: Path,
+    final_ego_state: dict[str, float],
+    goal_area: dict,
+    earliest_timestep: int,
+    position_geometry,
+) -> None:
+    payload = {
+        "version": GOAL_METADATA_VERSION,
+        "final_ego_state": final_ego_state,
+        "position_wkb": shapely.to_wkb(position_geometry, hex=True),
+        "area_length_m": float(goal_area["area_length_m"]),
+        "heading_tolerance_rad": float(goal_area["heading_tolerance_rad"]),
+        "earliest_timestep": int(earliest_timestep),
+    }
+    (scene_cache_dir / GOAL_METADATA_FILENAME).write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    )
+
+
+def load_goal_metadata(scene_cache_dir: Path) -> dict:
+    source = Path(scene_cache_dir) / GOAL_METADATA_FILENAME
+    if not source.is_file():
+        raise FileNotFoundError(f"nuPlan goal metadata is missing at {source}; rebuild the scene cache.")
+    payload = json.loads(source.read_text())
+    if payload.get("version") != GOAL_METADATA_VERSION:
+        raise RuntimeError(f"Unsupported nuPlan goal metadata version: {payload.get('version')!r}")
+    return payload
 
 NUPLAN_DT: Final[float] = 0.05
 NUPLAN_FULL_MAP_NAME_DICT: Final[Dict[str, str]] = {

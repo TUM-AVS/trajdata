@@ -13,8 +13,14 @@ from trajdata.data_structures import (
 
 class RawDataset:
     def __init__(
-        self, env_name: str, data_dir: str, parallelizable: bool, has_maps: bool
+        self,
+        env_name: str,
+        data_dir: str,
+        parallelizable: bool,
+        has_maps: bool,
+        dataset_options: Optional[Dict[str, Any]] = None,
     ) -> None:
+        self.dataset_options = {} if dataset_options is None else dict(dataset_options)
         metadata = self.compute_metadata(env_name, data_dir)
 
         self.metadata = metadata
