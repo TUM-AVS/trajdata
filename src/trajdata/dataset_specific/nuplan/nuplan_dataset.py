@@ -31,7 +31,9 @@ from trajdata.utils import arr_utils
 
 class NuplanDataset(RawDataset):
     def compute_metadata(self, env_name: str, data_dir: str) -> EnvMetadata:
-        all_log_splits: Dict[str, List[str]] = nuplan_utils.create_splits_logs()
+        all_log_splits: Dict[str, List[str]] = nuplan_utils.create_splits_logs(
+            self.dataset_options.get("split_config_path")
+        )
 
         nup_log_splits: Dict[str, List[str]]
         if env_name.startswith("nuplan_mini"):

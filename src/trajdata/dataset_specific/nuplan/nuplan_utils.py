@@ -61,7 +61,11 @@ def create_goal_geometry(vector_map: VectorMap, final_ego_state: dict[str, float
             continue
         center_xy = np.asarray(lane.center.xy, dtype=float)
         index = int(np.argmin(np.linalg.norm(center_xy - goal_xy, axis=1)))
-        width = float(np.linalg.norm(lane.left_edge.xy[index] - lane.right_edge.xy[index]))
+        left_xy = np.asarray(lane.left_edge.xy, dtype=float)
+        right_xy = np.asarray(lane.right_edge.xy, dtype=float)
+        left_point = left_xy[np.argmin(np.linalg.norm(left_xy - goal_xy, axis=1))]
+        right_point = right_xy[np.argmin(np.linalg.norm(right_xy - goal_xy, axis=1))]
+        width = float(np.linalg.norm(left_point - right_point))
         distance = float(np.linalg.norm(center_xy[index] - goal_xy))
         if width > 0.0 and distance <= 0.5 * width + 0.05:
             candidates.append((distance, str(lane.id), width))
@@ -288,8 +292,14 @@ def nuplan_type_to_unified_type(nuplan_type: str) -> AgentType:
         return AgentType.UNKNOWN
 
 
-def create_splits_logs() -> Dict[str, List[str]]:
-    yaml_filepath = Path(common_cfg.__path__[0]) / "splitter" / "nuplan.yaml"
+def create_splits_logs(config_path: str | Path | None = None) -> Dict[str, List[str]]:
+    yaml_filepath = (
+        Path(config_path)
+        if config_path is not None
+        else Path(common_cfg.__path__[0]) / "splitter" / "nuplan.yaml"
+    )
+    if not yaml_filepath.is_file():
+        raise FileNotFoundError(f"nuPlan split configuration not found: {yaml_filepath}")
     with open(yaml_filepath, "r") as stream:
         splits = yaml.safe_load(stream)
 
