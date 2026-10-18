@@ -65,6 +65,8 @@ class NuPlanSceneRecord(NamedTuple):
 
 
 class CommonRoadSceneRecord(NamedTuple):
+    """Filename inventory; length is optional and retained for old cache compatibility."""
+
     name: str
-    length: str
+    length: str | None
     data_idx: int

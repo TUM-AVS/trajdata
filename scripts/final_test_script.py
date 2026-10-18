@@ -61,7 +61,7 @@ from trajdata.utils.parallel_utils import parallel_apply
 
 from trajdata.dataset_specific.commonroad import CommonRoadDataset
 from trajdata.dataset_specific.commonroad.commonroad_utils import (
-    CommonRoadScenarios,
+    CommonRoadScenarioHandler,
     translate_agent_type,
     pad_and_interpolate_array,
     check_obstacle_validity,

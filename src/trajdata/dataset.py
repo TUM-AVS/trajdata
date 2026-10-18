@@ -108,6 +108,7 @@ class UnifiedDataset(Dataset):
         cache_location: str = "~/.unified_data_cache",
         rebuild_cache: bool = False,
         rebuild_maps: bool = False,
+        refresh_cached_scenes: bool = False,
         save_index: bool = False,
         num_workers: int = 0,
         verbose: bool = False,
@@ -150,6 +151,7 @@ class UnifiedDataset(Dataset):
             cache_location (str, optional): Where to store and load preprocessed, cached data. Defaults to "~/.unified_data_cache".
             rebuild_cache (bool, optional): If True, process and cache trajectory data even if it is already cached. Defaults to False.
             rebuild_maps (bool, optional): If True, process and cache maps even if they are already cached. Defaults to False.
+            refresh_cached_scenes (bool, optional): Ask dataset adapters that support it to discover source scenes added since the cached environment scene list was written. Existing per-scene conversions are retained. Defaults to False.
             save_index (bool, optional): If True, save the resulting agent (or scene) data index after it is computed (speeding up subsequent initializations with the same argument values).
             num_workers (int, optional): Number of parallel workers to use for dataset preprocessing and loading. Defaults to 0.
             verbose (bool, optional):  If True, print internal data loading information. Defaults to False.
@@ -261,6 +263,25 @@ class UnifiedDataset(Dataset):
 
         self.check_args_combinations(matching_datasets)
 
+        refreshed_envs: List[str] = []
+        if refresh_cached_scenes and not self.rebuild_cache:
+            for env in self.envs:
+                if (
+                    any(env.name in dataset_tuple for dataset_tuple in matching_datasets)
+                    and self.env_cache.env_is_cached(env.name)
+                    and env.refresh_cached_scenes(
+                        self.env_cache, self.cache_class, self.verbose
+                    )
+                ):
+                    refreshed_envs.append(env.name)
+
+            if refreshed_envs and self.verbose:
+                print(
+                    "Refreshed cached scene lists for: "
+                    + ", ".join(refreshed_envs),
+                    flush=True,
+                )
+
         self._map_api: Optional[MapAPI] = None
         if self.incl_vector_map:
             self._map_api = MapAPI(
@@ -307,7 +328,9 @@ class UnifiedDataset(Dataset):
                 ):
                     # Loading dataset objects in case we don't have
                     # the desired data already cached.
-                    env.load_dataset_obj(verbose=self.verbose)
+                    env.load_dataset_obj(verbose=False)
+                    # Map and trajectory processing must use the same selection.
+                    scenes_list = self._get_desired_scenes_from_env(matching_datasets, env)
 
                     if (
                         rebuild_maps
@@ -318,18 +341,17 @@ class UnifiedDataset(Dataset):
                     ):
                         # Use only rank 0 process for caching when using multi-GPU torch training.
                         maps_dir = self.cache_class.get_maps_path(self.cache_path, env.name)
-                        if maps_dir.exists():
-                            import shutil
-                            shutil.rmtree(maps_dir)
-                            if verbose:
-                                print(f"Cleared old maps cache at {maps_dir}")
+                        preserve_incremental_maps = (
+                            refresh_cached_scenes and env.name in refreshed_envs
+                        )
                         if rank == 0:
-                            env.cache_maps(
+                            env.cache_maps_for_scenes(
                                 self.cache_path,
                                 self.cache_class,
                                 self.raster_map_params,
+                                scenes_list,
+                                rebuild=rebuild_maps or (maps_dir.exists() and not preserve_incremental_maps),
                             )
-
                         # Wait for rank 0 process to be done with caching.
                         if (
                             distributed.is_initialized()
@@ -337,20 +359,29 @@ class UnifiedDataset(Dataset):
                         ):
                             distributed.barrier()
 
-                    scenes_list: List[
-                        SceneMetadata
-                    ] = self._get_desired_scenes_from_env(matching_datasets, env)
-
                 if self.incl_vector_map and env.metadata.map_locations is not None:
                     # env.metadata.map_locations can be none for map-containing
                     # datasets if they have a huge number of maps
                     # (or map crops, like Waymo).
-                    for map_name in env.metadata.map_locations:
+                    selected_map_names = {
+                        scene.location if isinstance(scene, Scene) else env.get_scene(scene).location
+                        for scene in scenes_list
+                    }
+                    for map_name in sorted(selected_map_names):
                         self._map_api.get_map(
                             f"{env.name}:{map_name}", **self.vector_map_params
                         )
 
                 all_scenes_list += scenes_list
+
+        # dedublicate commonroad scenarios
+        unique_scenes = {}
+        for scene in all_scenes_list:
+            if scene.env_name.startswith("commonroad"):
+                unique_scenes.setdefault(scene.name, scene)
+            else:
+                unique_scenes[(scene.env_name, scene.name)] = scene
+        all_scenes_list = list(unique_scenes.values())
 
         # List of cached scene paths.
         scene_paths: List[Path] = self._preprocess_scene_data(
@@ -367,7 +398,13 @@ class UnifiedDataset(Dataset):
             List[Tuple[str, int, np.ndarray]],
             List[Tuple[str, int, List[Tuple[str, np.ndarray]]]],
         ]
-        if self._index_cache_path().exists():
+        index_cache_path = self._index_cache_path()
+        if refreshed_envs and index_cache_path.exists():
+            # The index hash describes dataset arguments, not the source scene
+            # list. It would otherwise hide newly discovered cached scenes.
+            index_cache_path.unlink()
+
+        if index_cache_path.exists():
             data_index = self._load_data_index()
         else:
             data_index = self._get_data_index(num_workers, scene_paths)
@@ -1052,8 +1089,19 @@ class UnifiedDataset(Dataset):
     def num_scenes(self) -> int:
         return len(self._scene_index)
 
-    def scenes(self) -> Scene:
-        for scene_idx in range(self.num_scenes()):
+    def scenes(
+        self,
+        num_scenes: Optional[int] = None,
+        shuffle: bool = False,
+    ) -> Iterable[Scene]:
+        """Iterate cached scenes, optionally in a reproducibly shuffled subset."""
+        scene_indices = list(range(self.num_scenes()))
+        if shuffle:
+            random.Random(123).shuffle(scene_indices)
+        if num_scenes is not None:
+            scene_indices = scene_indices[:num_scenes]
+
+        for scene_idx in scene_indices:
             yield self.get_scene(scene_idx)
 
     def __iter__(self):

@@ -29,7 +29,10 @@ def decompress_values(data: np.ndarray) -> np.ndarray:
 
 
 def compress_values(data: np.ndarray) -> np.ndarray:
-    return (np.diff(data, axis=0, prepend=0.0) * MM_PER_M).astype(np.int32)
+    # Quantize coordinates before differencing: truncating each floating-point
+    # delta accumulates drift and separates shared boundaries/endpoints.
+    millimetres = np.rint(data * MM_PER_M).astype(np.int64)
+    return np.diff(millimetres, axis=0, prepend=0).astype(np.int32)
 
 
 def get_polyline_headings(points: np.ndarray) -> np.ndarray:

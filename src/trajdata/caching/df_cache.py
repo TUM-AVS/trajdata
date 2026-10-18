@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from inspect import signature
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ import dill
 import kornia
 import numpy as np
 import pandas as pd
+import shapely
 import torch
 import zarr
 
@@ -81,7 +83,16 @@ class DataFrameCache(SceneCache):
                 if isinstance(augment, DatasetAugmentation)
             ]
             for aug in dataset_augments:
-                aug.apply(self.scene_data_df)
+                # Pass metadata only to augmentations accepting the optional scene.
+                kwargs = {"scene": self.scene} if "scene" in signature(aug.apply).parameters else {}
+                augmented_df = aug.apply(self.scene_data_df, **kwargs)
+                if augmented_df is not None:
+                    self.scene_data_df = augmented_df.sort_index()
+                    # Structural augmentation invalidates the on-disk row index.
+                    self.index_dict = {
+                        key: idx for idx, key in enumerate(self.scene_data_df.index)
+                    }
+                    self._get_and_reorder_col_idxs()
 
     @staticmethod
     def _agent_data_file(scene_dt: float) -> str:
@@ -694,6 +705,60 @@ class DataFrameCache(SceneCache):
             idx: TrafficLightStatus(v["status"]) for idx, v in tls_data_df.iterrows()
         }
 
+    # STATIC LANE METADATA
+    @staticmethod
+    def save_map_metadata(
+        metadata: pd.DataFrame, cache_path: Path, env_name: str, map_name: str,
+    ) -> None:
+        """Cache static lane attributes independently of scene timestep resolution.
+
+        Lane attributes use a string ``lane_id`` index when present.
+        Columns must be Feather-compatible. Speed limits use ``speed_limit_mps``;
+        missing source limits remain null rather than receiving a default.
+        Optional JSON-compatible map-level fields in ``metadata.attrs["map_metadata"]``
+        are preserved in the Feather schema.
+        """
+        maps_path = DataFrameCache.get_maps_path(cache_path, env_name)
+        maps_path.mkdir(parents=True, exist_ok=True)
+        metadata.reset_index().to_feather(maps_path / f"{map_name}.metadata.feather")
+
+    def is_map_metadata_cached(self) -> bool:
+        return (
+            DataFrameCache.get_maps_path(self.path, self.scene.env_name)
+            / f"{self.scene.location}.metadata.feather"
+        ).is_file()
+
+    def load_map_metadata(self) -> pd.DataFrame:
+        """Load metadata, decoding ``*_wkb`` fields to Shapely geometries.
+
+        Field names and list structure are preserved; absent fields stay absent.
+        """
+        path = (
+            DataFrameCache.get_maps_path(self.path, self.scene.env_name)
+            / f"{self.scene.location}.metadata.feather"
+        )
+        metadata = pd.read_feather(path, use_threads=False)
+        if "lane_id" in metadata.columns:
+            metadata = metadata.set_index("lane_id")
+        def decode_wkb(value: Any, wkb_field: bool = False) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: decode_wkb(item, isinstance(key, str) and key.endswith("_wkb"))
+                    for key, item in value.items()
+                }
+            if isinstance(value, (list, tuple, np.ndarray)):
+                return [decode_wkb(item, wkb_field) for item in value]
+            if wkb_field and isinstance(value, (str, bytes)):
+                return shapely.from_wkb(value)
+            return value
+
+        for column in metadata.columns:
+            if isinstance(column, str) and column.endswith("_wkb"):
+                metadata[column] = metadata[column].map(lambda value: decode_wkb(value, True))
+        if "map_metadata" in metadata.attrs:
+            metadata.attrs["map_metadata"] = decode_wkb(metadata.attrs["map_metadata"])
+        return metadata
+
     # MAPS
     @staticmethod
     def get_maps_path(cache_path: Path, env_name: str) -> Path:
@@ -748,6 +813,29 @@ class DataFrameCache(SceneCache):
             and raster_metadata_path.exists()
             and raster_map_path.exists()
         )
+
+    @staticmethod
+    def remove_map_cache(cache_path: Path, env_name: str, map_name: str) -> None:
+        """Remove all vector/raster cache files for one named map."""
+        maps_path = DataFrameCache.get_maps_path(cache_path, env_name)
+        if not maps_path.is_dir():
+            return
+
+        exact_names = {
+            f"{map_name}.pb", f"{map_name}.metadata.json",
+            f"{map_name}.metadata.feather",
+        }
+        generated_prefix = f"{map_name}_"
+        for map_artifact in maps_path.iterdir():
+            if (
+                map_artifact.name in exact_names
+                or map_artifact.name.startswith(generated_prefix)
+            ):
+                if map_artifact.is_dir():
+                    import shutil
+                    shutil.rmtree(map_artifact)
+                else:
+                    map_artifact.unlink()
 
     @staticmethod
     def finalize_and_cache_map(

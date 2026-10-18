@@ -55,6 +55,7 @@ class VectorMap:
     search_kdtrees: Optional[Dict[MapElementType, MapElementKDTree]] = None
     search_rtrees: Optional[Dict[MapElementType, MapElementSTRTree]] = None
     traffic_light_status: Optional[Dict[Tuple[str, int], TrafficLightStatus]] = None
+    metadata: Optional[dict] = None
 
     def __post_init__(self) -> None:
         self.env_name, self.map_name = self.map_id.split(":")
@@ -67,7 +68,7 @@ class VectorMap:
         self.elements[map_elem.elem_type][map_elem.id] = map_elem
 
     def compute_search_indices(self) -> None:
-        self.search_kdtrees = {MapElementType.ROAD_LANE: LaneCenterKDTree(self)}
+        self.search_kdtrees = {MapElementType.ROAD_LANE: LaneCenterKDTree(self, max_segment_len=1.0)}
         self.search_rtrees = {
             elem_type: MapElementSTRTree(self, elem_type)
             for elem_type in [

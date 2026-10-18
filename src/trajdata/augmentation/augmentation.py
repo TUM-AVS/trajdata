@@ -1,6 +1,7 @@
 import pandas as pd
 
 from trajdata.data_structures.batch import AgentBatch, SceneBatch
+from trajdata.data_structures.scene_metadata import Scene
 
 
 class Augmentation:
@@ -9,7 +10,13 @@ class Augmentation:
 
 
 class DatasetAugmentation(Augmentation):
-    def apply(self, scene_data_df: pd.DataFrame) -> None:
+    def apply(
+        self, scene_data_df: pd.DataFrame, scene: Scene | None = None
+    ) -> pd.DataFrame | None:
+        """Optionally update scene metadata and return a replacement DataFrame.
+
+        Existing in-place augmentations may omit scene and return None.
+        """
         raise NotImplementedError()
 
 
