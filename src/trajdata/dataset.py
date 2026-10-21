@@ -68,9 +68,7 @@ class UnifiedDataset(Dataset):
             None,
             None,
         ),  # Both inclusive
-        agent_interaction_distances: Dict[
-            Tuple[AgentType, AgentType], float
-        ] = defaultdict(lambda: np.inf),
+        agent_interaction_distances: Dict[Tuple[AgentType, AgentType], float] = defaultdict(lambda: np.inf),
         incl_robot_future: bool = False,
         incl_raster_map: bool = False,
         raster_map_params: Optional[Dict[str, Any]] = None,
@@ -109,13 +107,12 @@ class UnifiedDataset(Dataset):
         rebuild_cache: bool = False,
         rebuild_maps: bool = False,
         refresh_cached_scenes: bool = False,
+        refresh_cached_scenes: bool = False,
         save_index: bool = False,
         num_workers: int = 0,
         verbose: bool = False,
         extras: Dict[str, Callable[..., np.ndarray]] = dict(),
-        transforms: Iterable[
-            Callable[..., Union[AgentBatchElement, SceneBatchElement]]
-        ] = (),
+        transforms: Iterable[Callable[..., Union[AgentBatchElement, SceneBatchElement]]] = (),
         rank: int = 0,
     ) -> None:
         """Instantiates a PyTorch Dataset object which aggregates data
@@ -152,6 +149,7 @@ class UnifiedDataset(Dataset):
             rebuild_cache (bool, optional): If True, process and cache trajectory data even if it is already cached. Defaults to False.
             rebuild_maps (bool, optional): If True, process and cache maps even if they are already cached. Defaults to False.
             refresh_cached_scenes (bool, optional): Ask dataset adapters that support it to discover source scenes added since the cached environment scene list was written. Existing per-scene conversions are retained. Defaults to False.
+            refresh_cached_scenes (bool, optional): Ask dataset adapters that support it to discover source scenes added since the cached environment scene list was written. Existing per-scene conversions are retained. Defaults to False.
             save_index (bool, optional): If True, save the resulting agent (or scene) data index after it is computed (speeding up subsequent initializations with the same argument values).
             num_workers (int, optional): Number of parallel workers to use for dataset preprocessing and loading. Defaults to 0.
             verbose (bool, optional):  If True, print internal data loading information. Defaults to False.
@@ -160,9 +158,7 @@ class UnifiedDataset(Dataset):
             rank (int, optional): Proccess rank when using torch DistributedDataParallel for multi-GPU training. Only the rank 0 process will be used for caching.
         """
         self.desired_data: List[str] = desired_data
-        self.scene_description_contains: Optional[
-            List[str]
-        ] = scene_description_contains
+        self.scene_description_contains: Optional[List[str]] = scene_description_contains
         self.centric: str = centric
         self.desired_dt: float = desired_dt
 
@@ -175,12 +171,10 @@ class UnifiedDataset(Dataset):
         self.env_cache: EnvCache = EnvCache(self.cache_path)
 
         if incl_raster_map:
-            assert (
-                raster_map_params is not None
-            ), r"Path size information, i.e., {'px_per_m': ..., 'map_size_px': ...}, must be provided if incl_map=True"
-            assert (
-                raster_map_params["map_size_px"] % 2 == 0
-            ), "Patch parameter 'map_size_px' must be divisible by 2"
+            assert raster_map_params is not None, (
+                r"Path size information, i.e., {'px_per_m': ..., 'map_size_px': ...}, must be provided if incl_map=True"
+            )
+            assert raster_map_params["map_size_px"] % 2 == 0, "Patch parameter 'map_size_px' must be divisible by 2"
 
         require_map_cache = require_map_cache or incl_raster_map
 
@@ -244,13 +238,9 @@ class UnifiedDataset(Dataset):
 
         # Ensuring scene description queries are all lowercase
         if self.scene_description_contains is not None:
-            self.scene_description_contains = [
-                s.lower() for s in self.scene_description_contains
-            ]
+            self.scene_description_contains = [s.lower() for s in self.scene_description_contains]
 
-        self.envs: List[RawDataset] = env_utils.get_raw_datasets(
-            data_dirs, dataset_options
-        )
+        self.envs: List[RawDataset] = env_utils.get_raw_datasets(data_dirs, dataset_options)
         self.envs_dict: Dict[str, RawDataset] = {env.name: env for env in self.envs}
 
         matching_datasets: List[SceneTag] = self._get_matching_scene_tags(desired_data)
@@ -295,15 +285,10 @@ class UnifiedDataset(Dataset):
                 all_data_cached: bool = False
                 all_maps_cached: bool = not env.has_maps or not require_map_cache
                 if self.env_cache.env_is_cached(env.name) and not self.rebuild_cache:
-                    scenes_list: List[Scene] = self._get_desired_scenes_from_env(
-                        matching_datasets, env
-                    )
+                    scenes_list: List[Scene] = self._get_desired_scenes_from_env(matching_datasets, env)
 
                     all_data_cached: bool = all(
-                        self.env_cache.scene_is_cached(
-                            scene.env_name, scene.name, scene.dt
-                        )
-                        for scene in scenes_list
+                        self.env_cache.scene_is_cached(scene.env_name, scene.name, scene.dt) for scene in scenes_list
                     )
 
                     all_maps_cached: bool = (
@@ -320,14 +305,12 @@ class UnifiedDataset(Dataset):
                         )
                     )
 
-                if (
-                    not all_data_cached
-                    or not all_maps_cached
-                    or self.rebuild_cache
-                    or rebuild_maps
-                ):
+                if not all_data_cached or not all_maps_cached or self.rebuild_cache or rebuild_maps:
                     # Loading dataset objects in case we don't have
                     # the desired data already cached.
+                    env.load_dataset_obj(verbose=False)
+                    # Map and trajectory processing must use the same selection.
+                    scenes_list = self._get_desired_scenes_from_env(matching_datasets, env)
                     env.load_dataset_obj(verbose=False)
                     # Map and trajectory processing must use the same selection.
                     scenes_list = self._get_desired_scenes_from_env(matching_datasets, env)
@@ -335,13 +318,12 @@ class UnifiedDataset(Dataset):
                     if (
                         rebuild_maps
                         or not all_maps_cached
-                        or not self.cache_class.are_maps_cached(
-                            self.cache_path, env.name
-                        )
+                        or not self.cache_class.are_maps_cached(self.cache_path, env.name)
                     ):
                         # Use only rank 0 process for caching when using multi-GPU torch training.
                         # Missing selected maps must not discard other cached maps.
                         if rank == 0:
+                            env.cache_maps_for_scenes(
                             env.cache_maps_for_scenes(
                                 self.cache_path,
                                 self.cache_class,
@@ -350,10 +332,7 @@ class UnifiedDataset(Dataset):
                                 rebuild=rebuild_maps,
                             )
                         # Wait for rank 0 process to be done with caching.
-                        if (
-                            distributed.is_initialized()
-                            and distributed.get_world_size() > 1
-                        ):
+                        if distributed.is_initialized() and distributed.get_world_size() > 1:
                             distributed.barrier()
 
                 if self.incl_vector_map and env.metadata.map_locations is not None:
@@ -380,10 +359,17 @@ class UnifiedDataset(Dataset):
                 unique_scenes[(scene.env_name, scene.name)] = scene
         all_scenes_list = list(unique_scenes.values())
 
+        # dedublicate commonroad scenarios
+        unique_scenes = {}
+        for scene in all_scenes_list:
+            if scene.env_name.startswith("commonroad"):
+                unique_scenes.setdefault(scene.name, scene)
+            else:
+                unique_scenes[(scene.env_name, scene.name)] = scene
+        all_scenes_list = list(unique_scenes.values())
+
         # List of cached scene paths.
-        scene_paths: List[Path] = self._preprocess_scene_data(
-            all_scenes_list, num_workers
-        )
+        scene_paths: List[Path] = self._preprocess_scene_data(all_scenes_list, num_workers)
         if self.verbose:
             print(len(scene_paths), "scenes in the scene index.")
 
@@ -464,11 +450,7 @@ class UnifiedDataset(Dataset):
                 )
                 waymo_warning_given = True
 
-            elif (
-                not nuplan_warning_given
-                and self.incl_vector_map
-                and dataset.matches_any(nuplan_pattern)
-            ):
+            elif not nuplan_warning_given and self.incl_vector_map and dataset.matches_any(nuplan_pattern):
                 warnings.warn(
                     (
                         "\n\n############ WARNING! ############\n"
@@ -484,9 +466,7 @@ class UnifiedDataset(Dataset):
                 )
                 nuplan_warning_given = True
 
-    def _index_cache_path(
-        self, ret_args: bool = False
-    ) -> Union[Path, Tuple[Path, Dict[str, Any]]]:
+    def _index_cache_path(self, ret_args: bool = False) -> Union[Path, Tuple[Path, Dict[str, Any]]]:
         # Whichever UnifiedDataset arguments affect data indexing are captured
         # and hashed together here.
         impactful_args: Dict[str, Any] = {
@@ -499,15 +479,9 @@ class UnifiedDataset(Dataset):
             "history_sec": self.history_sec,
             "future_sec": self.future_sec,
             "incl_robot_future": self.incl_robot_future,
-            "only_types": tuple(t.name for t in self.only_types)
-            if self.only_types is not None
-            else None,
-            "only_predict": tuple(t.name for t in self.only_predict)
-            if self.only_predict is not None
-            else None,
-            "no_types": tuple(t.name for t in self.no_types)
-            if self.no_types is not None
-            else None,
+            "only_types": tuple(t.name for t in self.only_types) if self.only_types is not None else None,
+            "only_predict": tuple(t.name for t in self.only_predict) if self.only_predict is not None else None,
+            "no_types": tuple(t.name for t in self.no_types) if self.no_types is not None else None,
             "ego_only": self.ego_only,
         }
         selected_scene_names = {
@@ -568,9 +542,7 @@ class UnifiedDataset(Dataset):
 
         return data_index
 
-    def load_or_create_cache(
-        self, cache_path: str, num_workers=0, filter_fn=None
-    ) -> None:
+    def load_or_create_cache(self, cache_path: str, num_workers=0, filter_fn=None) -> None:
         if isfile(cache_path):
             print(f"Loading cache from {cache_path} ...", end="")
             t = time.time()
@@ -671,9 +643,7 @@ class UnifiedDataset(Dataset):
                     keep_count += 1
                     if max_count is not None and keep_count >= max_count:
                         # Add False for remaining samples and break loop
-                        print(
-                            f"Reached maximum number of {max_count} elements, terminating early."
-                        )
+                        print(f"Reached maximum number of {max_count} elements, terminating early.")
                         break
 
             del cache_data_iterator
@@ -696,9 +666,7 @@ class UnifiedDataset(Dataset):
         self._data_index = [self._data_index[i] for i in keep_ids]
         self._data_len = len(self._data_index)
 
-        print(
-            f"Kept {self._data_len}/{old_len} elements, {self._data_len/old_len*100.0:.2f}%."
-        )
+        print(f"Kept {self._data_len}/{old_len} elements, {self._data_len / old_len * 100.0:.2f}%.")
 
     def _get_data_index(
         self, num_workers: int, scene_paths: List[Path]
@@ -748,9 +716,7 @@ class UnifiedDataset(Dataset):
                 desc=desc + " (Serially)",
                 disable=not self.verbose,
             ):
-                _, orig_path, index_elems_len, index_elems = data_index_fn(
-                    scene_info_path
-                )
+                _, orig_path, index_elems_len, index_elems = data_index_fn(scene_info_path)
                 if len(index_elems) > 0:
                     data_index.append((str(orig_path), index_elems_len, index_elems))
         else:
@@ -785,9 +751,7 @@ class UnifiedDataset(Dataset):
             # This is where we remove scene timesteps that would have no remaining agents after filtering.
             if filtering.all_agents_excluded_types(no_types, scene.agent_presence[ts]):
                 continue
-            elif filtering.no_agent_included_types(
-                only_types, scene.agent_presence[ts]
-            ):
+            elif filtering.no_agent_included_types(only_types, scene.agent_presence[ts]):
                 continue
 
             if filtering.no_agent_satisfies_time(
@@ -844,9 +808,7 @@ class UnifiedDataset(Dataset):
                 # We only want to return the ego.
                 continue
 
-            valid_ts: Tuple[int, int] = filtering.get_valid_ts(
-                agent_info, scene.dt, history_sec, future_sec
-            )
+            valid_ts: Tuple[int, int] = filtering.get_valid_ts(agent_info, scene.dt, history_sec, future_sec)
 
             num_agent_ts: int = valid_ts[1] - valid_ts[0] + 1
             if num_agent_ts > 0:
@@ -860,19 +822,13 @@ class UnifiedDataset(Dataset):
             index_elems,
         )
 
-    def get_collate_fn(
-        self, return_dict: bool = False, pad_format: str = "outside"
-    ) -> Callable:
+    def get_collate_fn(self, return_dict: bool = False, pad_format: str = "outside") -> Callable:
         if pad_format not in {"outside", "right"}:
             raise ValueError("Padding format must be one of {'outside', 'right'}")
 
         batch_augments: Optional[List[BatchAugmentation]] = None
         if self.augmentations:
-            batch_augments = [
-                batch_aug
-                for batch_aug in self.augmentations
-                if isinstance(batch_aug, BatchAugmentation)
-            ]
+            batch_augments = [batch_aug for batch_aug in self.augmentations if isinstance(batch_aug, BatchAugmentation)]
 
         if self.centric == "agent":
             collate_fn = partial(
@@ -921,8 +877,7 @@ class UnifiedDataset(Dataset):
     ) -> Union[List[Scene], List[SceneMetadata]]:
         scenes_list: Union[List[Scene], List[SceneMetadata]] = list()
         for scene_tag in tqdm(
-            scene_tags, desc=f"Getting Scenes from {env.name} with scene tag {scene_tags}",
-            disable=not self.verbose
+            scene_tags, desc=f"Getting Scenes from {env.name} with scene tag {scene_tags}", disable=not self.verbose
         ):
             if env.name in scene_tag:
                 scenes_list += env.get_matching_scenes(
@@ -952,14 +907,10 @@ class UnifiedDataset(Dataset):
         parallel_scenes: List[SceneMetadata]
         if num_workers > 1 and not all_cached:
             serial_scenes = [
-                scene_info
-                for scene_info in scenes_list
-                if not self.envs_dict[scene_info.env_name].parallelizable
+                scene_info for scene_info in scenes_list if not self.envs_dict[scene_info.env_name].parallelizable
             ]
             parallel_scenes = [
-                scene_info
-                for scene_info in scenes_list
-                if self.envs_dict[scene_info.env_name].parallelizable
+                scene_info for scene_info in scenes_list if self.envs_dict[scene_info.env_name].parallelizable
             ]
 
             # Fixing the seed for random suffling (for debugging and reproducibility).
@@ -980,9 +931,7 @@ class UnifiedDataset(Dataset):
                 desc="Calculating Agent Data (Serially)",
                 disable=not self.verbose,
             ):
-                scene_dt: float = (
-                    self.desired_dt if self.desired_dt is not None else scene_info.dt
-                )
+                scene_dt: float = self.desired_dt if self.desired_dt is not None else scene_info.dt
                 if not self.rebuild_cache and self.env_cache.scene_is_cached(
                     scene_info.env_name, scene_info.name, scene_dt
                 ):
@@ -1008,9 +957,7 @@ class UnifiedDataset(Dataset):
                     self.desired_dt,
                 )
 
-                scene_path: Path = EnvCache.scene_metadata_path(
-                    self.cache_path, scene.env_name, scene.name, scene.dt
-                )
+                scene_path: Path = EnvCache.scene_metadata_path(self.cache_path, scene.env_name, scene.name, scene.dt)
                 scene_paths.append(scene_path)
 
         # Done with these lists. Cutting memory usage because
@@ -1041,10 +988,7 @@ class UnifiedDataset(Dataset):
             # like it'd be good to reuse).
             parallel_preprocessor = ParallelDatasetPreprocessor(
                 parallel_scenes,
-                {
-                    env_name: str(env.metadata.data_dir)
-                    for env_name, env in self.envs_dict.items()
-                },
+                {env_name: str(env.metadata.data_dir) for env_name, env in self.envs_dict.items()},
                 str(self.env_cache.path),
                 self.desired_dt,
                 self.cache_class,
@@ -1074,11 +1018,7 @@ class UnifiedDataset(Dataset):
                 desc=f"Calculating Agent Data ({num_workers} CPUs)",
                 disable=not self.verbose,
             ):
-                scene_paths += [
-                    Path(path_str)
-                    for path_str in processed_scene_paths
-                    if path_str is not None
-                ]
+                scene_paths += [Path(path_str) for path_str in processed_scene_paths if path_str is not None]
 
         return scene_paths
 
@@ -1090,6 +1030,19 @@ class UnifiedDataset(Dataset):
     def num_scenes(self) -> int:
         return len(self._scene_index)
 
+    def scenes(
+        self,
+        num_scenes: Optional[int] = None,
+        shuffle: bool = False,
+    ) -> Iterable[Scene]:
+        """Iterate cached scenes, optionally in a reproducibly shuffled subset."""
+        scene_indices = list(range(self.num_scenes()))
+        if shuffle:
+            random.Random(123).shuffle(scene_indices)
+        if num_scenes is not None:
+            scene_indices = scene_indices[:num_scenes]
+
+        for scene_idx in scene_indices:
     def scenes(
         self,
         num_scenes: Optional[int] = None,
@@ -1123,9 +1076,7 @@ class UnifiedDataset(Dataset):
 
         scene: Scene = EnvCache.load(scene_path)
         scene_utils.enforce_desired_dt(scene, self.desired_dt)
-        scene_cache: SceneCache = self.cache_class(
-            self.cache_path, scene, self.augmentations
-        )
+        scene_cache: SceneCache = self.cache_class(self.cache_path, scene, self.augmentations)
         scene_cache.set_obs_format(self.obs_format)
 
         if self.centric == "scene":

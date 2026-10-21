@@ -14,6 +14,7 @@ from trajdata.dataset_specific.commonroad import commonroad_utils
 # Try to import CommonRoad reader; if not present, users will need to install commonroad-io
 try:
     from commonroad.scenario.scenario import Scenario
+
     # from commonroad.scenario.obstacle import Obstacle, StaticObstacle, DynamicObstacle, EnvironmentObstacle, PhantomObstacle, Prediction, TrajectoryPrediction, SetBasedPrediction
     # from commonroad.scenario.trajectory import Trajectory
     # from commonroad.scenario.state import State, KSState, InitialState, PMState, KSTState, STState, STDState, MBState, LongitudinalState, LateralState, InputState, PMInputState, CustomState, ExtendedPMState
@@ -41,33 +42,38 @@ from trajdata.maps.vec_map import VectorMap
 from trajdata.utils import arr_utils
 from trajdata.utils.parallel_utils import parallel_apply
 
-from trajdata.dataset_specific.commonroad.commonroad_utils import CommonRoadScenarioHandler, translate_agent_type #, pad_and_interpolate_array # , check_obstacle_validity, check_state_validity
+from trajdata.dataset_specific.commonroad.commonroad_utils import (
+    CommonRoadScenarioHandler,
+    translate_agent_type,
+)  # , pad_and_interpolate_array # , check_obstacle_validity, check_state_validity
 from trajdata.dataset_specific.scene_records import CommonRoadSceneRecord
+
 
 def const_lambda(const_val: Any) -> Any:
     return const_val
 
+
 class CommonRoadDataset(RawDataset):
-    def compute_metadata(self, env_name: str, data_dir: str)-> EnvMetadata:
-        dataset_parts = [(env_name,)]                   
-        scene_split_map = defaultdict(partial(const_lambda, const_val=env_name))     
-        map_locations = [f.stem for f in Path(data_dir).glob("*.xml") ]
+    def compute_metadata(self, env_name: str, data_dir: str) -> EnvMetadata:
+        dataset_parts = [(env_name,)]
+        scene_split_map = defaultdict(partial(const_lambda, const_val=env_name))
+        map_locations = [f.stem for f in Path(data_dir).glob("*.xml")]
         map_locations = cast(Tuple[str], tuple(map_locations))
         """Get timeStepSize for all scenario files"""
         return EnvMetadata(
-            name = env_name,
+            name=env_name,
             data_dir=data_dir,
-            dt = commonroad_utils.COMMONROAD_DT,
+            dt=commonroad_utils.COMMONROAD_DT,
             parts=dataset_parts,
             scene_split_map=scene_split_map,
             map_locations=map_locations,
         )
 
-    def load_dataset_obj(self, verbose = False) -> None:
+    def load_dataset_obj(self, verbose=False) -> None:
         if verbose:
-            print(f"Loading {self.name} dataset ", flush = True)
+            print(f"Loading {self.name} dataset ", flush=True)
 
-        self.dataset_obj = CommonRoadScenarioHandler(data_dir = self.metadata.data_dir)      
+        self.dataset_obj = CommonRoadScenarioHandler(data_dir=self.metadata.data_dir)
 
         if verbose:
             print(f"Found {self.dataset_obj.num_scenarios} scenarios", flush=True)
@@ -113,9 +119,7 @@ class CommonRoadDataset(RawDataset):
         """
         self.load_dataset_obj(verbose=verbose)
         current_records = self._all_scene_records()
-        modified_scenes = self.refresh_source_fingerprints(
-            env_cache, cache_class, self._source_fingerprints()
-        )
+        modified_scenes = self.refresh_source_fingerprints(env_cache, cache_class, self._source_fingerprints())
         cached_records = env_cache.load_env_scenes_list(self.name)
 
         if current_records == cached_records and not modified_scenes:
@@ -128,25 +132,27 @@ class CommonRoadDataset(RawDataset):
 
     def _get_matching_scenes_from_obj(
         self,
-        scene_tag: SceneTag,    #Set of Labels to search in its "tags" for fast categorical filtering, e.g {"intersection", "daytime"}, etc
-        scene_desc_contains: Optional[List[str]],  
+        scene_tag: SceneTag,  # Set of Labels to search in its "tags" for fast categorical filtering, e.g {"intersection", "daytime"}, etc
+        scene_desc_contains: Optional[List[str]],
         env_cache: EnvCache,
     ) -> List[SceneMetadata]:
-        
+
         all_scenes_list = self._all_scene_records()
         scenes_list: List[SceneMetadata] = list()
-        selected_names = self.dataset_options.get("scene_names")
-        selected_names = None if selected_names is None else set(selected_names)
 
-        for scene_record in all_scenes_list:
-            scene_name = scene_record.name
-            if selected_names is not None and scene_name not in selected_names:
-                continue
-            scene_split: str = self.metadata.scene_split_map[scene_name]       
+        for idx in range(self.dataset_obj.num_scenarios):
+            scene_name: str = self.dataset_obj.get_scenario_name(idx)  # identifier for the scene
+            scene_split: str = self.metadata.scene_split_map[scene_name]  # will remain "train" only for us right now.
+            scene_length: int = self.dataset_obj.get_scenario_length(
+                idx
+            )  # Commonroad has different lengths for each scenario
+
+            scene_record = CommonRoadSceneRecord(name=scene_name, length=str(scene_length), data_idx=idx)
+            all_scenes_list.append(scene_record)
 
             matches_split = scene_split in scene_tag  # Does the split match what user wants?
-            matches_description = True 
-            
+            matches_description = True
+
             if scene_desc_contains is not None:
                 matches_description = False
                 # Check if any of the required strings are in the scene name
@@ -156,17 +162,17 @@ class CommonRoadDataset(RawDataset):
                         break
             if matches_split and matches_description:
                 scene_metadata = SceneMetadata(
-                    env_name = self.metadata.name,
-                    name = scene_name,
-                    dt = self.metadata.dt,                                      
-                    raw_data_idx = scene_record.data_idx
+                    env_name=self.metadata.name,
+                    name=scene_name,
+                    dt=self.metadata.dt,
+                    raw_data_idx=scene_record.data_idx,
                 )
                 scenes_list.append(scene_metadata)
 
-        self.cache_all_scenes_list(env_cache, all_scenes_list)  
+        self.cache_all_scenes_list(env_cache, all_scenes_list)
         env_cache.save_source_fingerprints(self.name, self._source_fingerprints())
         return scenes_list
-            
+
     def get_scene(self, scene_info: SceneMetadata) -> Scene:
         _, name, _, data_idx = scene_info
         scene_name: str = name
@@ -176,63 +182,49 @@ class CommonRoadDataset(RawDataset):
         return Scene(
             env_metadata=self.metadata,
             name=name,
-            location=scene_name,          
+            location=scene_name,
             data_split=scene_split,
             length_timesteps=scene_length,
-            raw_data_idx=data_idx, 
-            data_access_info=None,                          
+            raw_data_idx=data_idx,
+            data_access_info=None,
         )
-    
+
     def _get_matching_scenes_from_cache(
         self,
         scene_tag: SceneTag,
         scene_desc_contains: Optional[List[str]],
         env_cache: EnvCache,
     ) -> List[Scene]:
-        records: List[CommonRoadSceneRecord] = env_cache.load_env_scenes_list(self.name)
-        scenes: List[Scene] = []
-        selected_names = self.dataset_options.get("scene_names")
-        selected_names = None if selected_names is None else set(selected_names)
-        for record in records:
-            if selected_names is not None and record.name not in selected_names:
-                continue
-            matches_description = scene_desc_contains is None or any(
-                text.lower() in record.name.lower() for text in scene_desc_contains
-            )
-            if self.metadata.scene_split_map[record.name] not in scene_tag or not matches_description:
-                continue
-            # Inventory lengths may be unknown. Cached Scene objects already
-            # contain the real length; only uncached selected scenes need parsing.
-            if env_cache.scene_is_cached(self.name, record.name, self.metadata.dt):
-                scene = env_cache.load_scene(self.name, record.name, self.metadata.dt)
-                scene.raw_data_idx = record.data_idx
-            else:
-                if self.dataset_obj is None:
-                    self.load_dataset_obj()
-                scene = self.get_scene(SceneMetadata(
-                    self.name, record.name, self.metadata.dt, record.data_idx,
-                ))
-            scenes.append(scene)
-        return scenes
+        all_scenes_list: List[CommonRoadSceneRecord] = env_cache.load_env_scenes_list(self.name)
 
- 
+        scenes_list: List[SceneMetadata] = list()
 
+        for scene_record in all_scenes_list:
+            scene_name, scene_length, data_idx = scene_record
+            scene_split: str = self.metadata.scene_split_map[scene_name]
+
+            if scene_split in scene_tag and scene_desc_contains is None:
+                scene_metadata = Scene(  # Called scene_metadata as Scene class holds info about the scene, not the literal data inside it. And ig SceneMetadata class is an even more lightweight version, probably for caching and referring to Scene.
+                    env_metadata=self.metadata,
+                    name=scene_name,
+                    location=scene_name,  # NOTE : Can be set as something else if Commonroad associates scenes with locations. Not sure what effect/significance this paramater has on the code itself however.
+                    data_split=scene_split,
+                    length_timesteps=scene_length,
+                    raw_data_idx=data_idx,
+                    data_access_info=None,  # Waymo says that this isn't used if everything is already cached or somehting. Still something to think about.
+                )
+                scenes_list.append(scene_metadata)
+        return scenes_list
 
     def get_agent_info(
         self, scene: Scene, cache_path: Path, cache_class: Type[SceneCache]
     ) -> Tuple[List[AgentMetadata], List[List[AgentMetadata]]]:
         """Cache CommonRoad states as records, padded to the scene timeline."""
-        scenario, planning_problem_set = self.dataset_obj.load_scenario(
-            scene.raw_data_idx
-        )
-        planning_problem = next(
-            iter(planning_problem_set.planning_problem_dict.values())
-        )
+        scenario, planning_problem_set = self.dataset_obj.load_scenario(scene.raw_data_idx)
+        planning_problem = next(iter(planning_problem_set.planning_problem_dict.values()))
 
         agent_list: List[AgentMetadata] = []
-        agent_presence: List[List[AgentMetadata]] = [
-            [] for _ in range(scene.length_timesteps + 1)
-        ]
+        agent_presence: List[List[AgentMetadata]] = [[] for _ in range(scene.length_timesteps + 1)]
         df_records: List[Dict[str, Any]] = []
         # dynamic obstacles
         for obstacle in scenario.dynamic_obstacles:
@@ -257,12 +249,12 @@ class CommonRoadDataset(RawDataset):
                 ),
             )
             agent_list.append(agent_info)
-            #TODO : ax, ay to large at first timestep -> does lowvelaugmentation solve this issue?
+            # TODO : ax, ay to large at first timestep -> does lowvelaugmentation solve this issue?
             for scene_ts in range(first_timestep, last_timestep + 1):
                 state = obstacle.state_at_time(scene_ts)
 
                 agent_presence[scene_ts].append(agent_info)
-                theta =arr_utils.angle_wrap(state.orientation)
+                theta = arr_utils.angle_wrap(state.orientation)
                 df_records.append(
                     {
                         "agent_id": agent_info.name,
@@ -306,10 +298,11 @@ class CommonRoadDataset(RawDataset):
         ego_first_timestep = ego_state.time_step
         if not 0 <= ego_first_timestep <= scene.length_timesteps:
             raise ValueError(
-                f"Ego initial timestep {ego_first_timestep} is outside scene "
-                f"[0, {scene.length_timesteps}]."
+                f"Ego initial timestep {ego_first_timestep} is outside scene [0, {scene.length_timesteps}]."
             )
-        vehicle_model = setup_vehicle_parameters(2)  # dummy/default vehicle model (BMW320), replaced by used vehicle model during simulation
+        vehicle_model = setup_vehicle_parameters(
+            2
+        )  # dummy/default vehicle model (BMW320), replaced by used vehicle model during simulation
         ego_info = AgentMetadata(
             name="ego",
             agent_type=AgentType.VEHICLE,
@@ -320,9 +313,9 @@ class CommonRoadDataset(RawDataset):
         agent_list.append(ego_info)
         for scene_ts in range(ego_first_timestep, scene.length_timesteps + 1):
             agent_presence[scene_ts].append(ego_info)
-        
+
         # goal_state= planning_problem.goal.state_list[0]
-        # goal_interval = range(goal_state.time_step.start, goal_state.time_step.end + 1) 
+        # goal_interval = range(goal_state.time_step.start, goal_state.time_step.end + 1)
         # goal_position = goal_state.position.shapes[0].center
         # goal_velocity = goal_state.velocity.end
         theta = arr_utils.angle_wrap(ego_state.orientation)
@@ -353,9 +346,7 @@ class CommonRoadDataset(RawDataset):
         # )
 
         # Compute accelerations and cache the agent data
-        agent_data = pd.DataFrame.from_records(df_records).set_index(
-            ["agent_id", "scene_ts"]
-        )
+        agent_data = pd.DataFrame.from_records(df_records).set_index(["agent_id", "scene_ts"])
         agent_data.sort_index(inplace=True)
         agent_data[["ax", "ay"]] = np.nan
         for _, agent_states in agent_data.groupby(level="agent_id", sort=False):
@@ -386,9 +377,7 @@ class CommonRoadDataset(RawDataset):
         )
 
         if scenario.lanelet_network.traffic_lights:
-            raise NotImplementedError(
-                "CommonRoad traffic-light caching is not implemented."
-            )
+            raise NotImplementedError("CommonRoad traffic-light caching is not implemented.")
 
         return agent_list, agent_presence
 
@@ -403,9 +392,10 @@ class CommonRoadDataset(RawDataset):
         scenario, planning_problem_set = self.dataset_obj.load_scenario(data_idx)
         planning_problem = next(iter(planning_problem_set.planning_problem_dict.values()))
         scenario_name = self.dataset_obj.get_scenario_name(data_idx)
-        vector_map: VectorMap = commonroad_utils.extract_vectorized(scenario.lanelet_network, 
-        map_name=f"{self.name}:{scenario_name}") #, country = scenario.scenario_id.country_name,
-            # ",
+        vector_map: VectorMap = commonroad_utils.extract_vectorized(
+            scenario.lanelet_network, map_name=f"{self.name}:{scenario_name}"
+        )  # , country = scenario.scenario_id.country_name,
+        # ",
         # )
         metadata_df = commonroad_utils.cache_map_metadata(scenario, planning_problem, vector_map)
         map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
@@ -414,7 +404,10 @@ class CommonRoadDataset(RawDataset):
         # cache_dir.mkdir(parents=True, exist_ok=True)
 
         map_cache_class.save_map_metadata(
-            metadata_df, cache_path, self.name, scenario_name,
+            metadata_df,
+            cache_path,
+            self.name,
+            scenario_name,
         )
         # commonroad_utils.write_vector_map_metadata(
         #     maps_path / f"{scenario_name}.metadata.json",
@@ -427,7 +420,6 @@ class CommonRoadDataset(RawDataset):
         #     planning_problem,
         #     float(scenario.dt),
         # )
-        
 
     def cache_maps_for_scenes(
         self,
@@ -441,12 +433,10 @@ class CommonRoadDataset(RawDataset):
         """Cache selected maps; rebuild clears the environment maps directory."""
         selected_names = {scene.name for scene in scenes}
         indices_by_name = {
-            self.dataset_obj.get_scenario_name(idx): idx
-            for idx in range(self.dataset_obj.num_scenarios)
+            self.dataset_obj.get_scenario_name(idx): idx for idx in range(self.dataset_obj.num_scenarios)
         }
         indices = [indices_by_name[name] for name in sorted(selected_names)]
-        self.cache_maps(cache_path, map_cache_class, map_params,
-                        scene_indices=indices, rebuild=rebuild)
+        self.cache_maps(cache_path, map_cache_class, map_params, scene_indices=indices, rebuild=rebuild)
 
     def cache_maps(
         self,
@@ -460,13 +450,14 @@ class CommonRoadDataset(RawDataset):
         """
         Get static, scene-level info from the source dataset, caching it
         to cache_path. (Primarily this is info needed to construct VectorMap)
-        
+
         Resolution is in pixels per meter.
         """
 
         maps_dir = map_cache_class.get_maps_path(cache_path, self.name)
         if rebuild and maps_dir.exists():
             import shutil
+
             shutil.rmtree(maps_dir)
 
         resolution = float(map_params["px_per_m"])
@@ -491,7 +482,7 @@ class CommonRoadDataset(RawDataset):
                     map_params=map_params,
                 ),
                 missing_map_indices,
-                num_workers=num_workers,            #NOTE : Can add a line that updates self.metadata's locations list (present in class EnvMetadata.map_locations). Then we can access list of all maps in an environment from dataset.envs[i].metadata.map_locations (easy iteration over the list)
+                num_workers=num_workers,  # NOTE : Can add a line that updates self.metadata's locations list (present in class EnvMetadata.map_locations). Then we can access list of all maps in an environment from dataset.envs[i].metadata.map_locations (easy iteration over the list)
             )
         else:
             for i in tqdm.tqdm(missing_map_indices):

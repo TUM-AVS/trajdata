@@ -20,9 +20,7 @@ class ConstantVelocityHistory(DatasetAugmentation):
     def __init__(self, max_history_sec: float) -> None:
         self.max_history_sec = float(max_history_sec)
 
-    def apply(
-        self, scene_data_df: pd.DataFrame, scene: Scene | None = None
-    ) -> pd.DataFrame:
+    def apply(self, scene_data_df: pd.DataFrame, scene: Scene | None = None) -> pd.DataFrame:
         steps = floor(Decimal(str(self.max_history_sec)) / Decimal(str(scene.dt)))
         if steps == 0:
             return scene_data_df
@@ -34,17 +32,13 @@ class ConstantVelocityHistory(DatasetAugmentation):
                 # Later arrivals have no recording-start history to pad.
                 continue
             if agent.first_timestep != 0:
-                raise NotImplementedError(
-                    "ConstantVelocityHistory only supports agents present at timestep 0."
-                )
+                raise NotImplementedError("ConstantVelocityHistory only supports agents present at timestep 0.")
             initial = scene_data_df.loc[(agent.name, 0)]
             timesteps = np.arange(-steps, 0)
             prefix = pd.DataFrame(
                 np.repeat(initial.to_numpy()[None, :], steps, axis=0),
                 columns=scene_data_df.columns,
-                index=pd.MultiIndex.from_product(
-                    [[agent.name], timesteps], names=scene_data_df.index.names
-                ),
+                index=pd.MultiIndex.from_product([[agent.name], timesteps], names=scene_data_df.index.names),
             )
             prefix["x"] = initial["x"] + timesteps * scene.dt * initial["vx"]
             prefix["y"] = initial["y"] + timesteps * scene.dt * initial["vy"]
