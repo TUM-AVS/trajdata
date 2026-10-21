@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Type, Union
 
@@ -65,6 +66,57 @@ class RawDataset:
     ) -> None:
         env_cache.save_env_scenes_list(self.name, all_scenes_list)
 
+    def refresh_cached_scenes(
+        self,
+        env_cache: EnvCache,
+        cache_class: Type[SceneCache],
+        verbose: bool = False,
+    ) -> bool:
+        """Refresh cached scene discovery metadata when this adapter supports it.
+
+        Returning ``True`` tells :class:`UnifiedDataset` that the set of
+        scenes may have changed, so its derived data index must be rebuilt.
+        Adapters that cannot cheaply or safely rediscover their source data
+        retain the existing cache-only behavior.
+        """
+        warnings.warn(
+            f"Incremental scene refresh is not implemented for dataset "
+            f"{self.name!r}; using its existing cached scene list.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+
+    def refresh_source_fingerprints(
+        self,
+        env_cache: EnvCache,
+        cache_class: Type[SceneCache],
+        current_fingerprints: Dict[str, str],
+    ) -> Set[str]:
+        """Invalidate only caches whose adapter-reported source changed.
+
+        The comparison and invalidation policy is shared by all adapters.
+        Concrete adapters only provide their ``scene_name -> fingerprint`` map.
+        An environment without a previous manifest establishes a baseline and
+        therefore does not invalidate its existing cache on that first run.
+        """
+        previous_fingerprints = env_cache.load_source_fingerprints(self.name)
+        if previous_fingerprints is None:
+            env_cache.save_source_fingerprints(self.name, current_fingerprints)
+            return set()
+
+        modified_scenes = {
+            scene_name
+            for scene_name, fingerprint in current_fingerprints.items()
+            if previous_fingerprints.get(scene_name) not in {None, fingerprint}
+        }
+        for scene_name in modified_scenes:
+            env_cache.remove_scene_cache(self.name, scene_name)
+            cache_class.remove_map_cache(env_cache.path, self.name, scene_name)
+
+        env_cache.save_source_fingerprints(self.name, current_fingerprints)
+        return modified_scenes
+
     def get_matching_scenes(
         self,
         scene_tag: SceneTag,
@@ -95,6 +147,25 @@ class RawDataset:
         to associate map information to positions.
         """
         raise NotImplementedError()
+
+    def cache_maps_for_scenes(
+        self,
+        cache_path: Path,
+        map_cache_class: Type[SceneCache],
+        map_params: Dict[str, Any],
+        scenes: List[Union[Scene, SceneMetadata]],
+        *,
+        rebuild: bool = False,
+    ) -> None:
+        """Compatibility for adapters with environment-wide map caching.
+
+        Scene-specific adapters override this to cache only selected maps.
+        """
+        maps_dir = map_cache_class.get_maps_path(cache_path, self.name)
+        if rebuild and maps_dir.exists():
+            import shutil
+            shutil.rmtree(maps_dir)
+        self.cache_maps(cache_path, map_cache_class, map_params)
 
     def cache_maps(
         self,

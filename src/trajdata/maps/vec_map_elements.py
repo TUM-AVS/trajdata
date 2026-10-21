@@ -133,6 +133,7 @@ class RoadLane(MapElement):
     next_lanes: Set[str] = field(default_factory=lambda: set())
     prev_lanes: Set[str] = field(default_factory=lambda: set())
     elem_type: MapElementType = MapElementType.ROAD_LANE
+    metadata: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if not self.center.has_heading:
@@ -151,11 +152,6 @@ class RoadLane(MapElement):
     def reachable_lanes(self) -> Set[str]:
         return self.adj_lanes_left | self.adj_lanes_right | self.next_lanes
 
-
-# Extend RoadLane with speed_limit
-# @dataclass
-# class RoadLaneWithSpeedLimit(RoadLane):
-#     speed_limit: float = None #  m/s
 
 @dataclass
 class RoadArea(MapElement):

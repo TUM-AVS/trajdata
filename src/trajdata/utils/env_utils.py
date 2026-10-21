@@ -62,7 +62,7 @@ def get_raw_dataset(
     if "commonroad" in dataset_name:
         from trajdata.dataset_specific.commonroad import CommonRoadDataset
 
-        return CommonRoadDataset(dataset_name, data_dir, parallelizable=False, has_maps=True, dataset_options=dataset_options)
+        return CommonRoadDataset(dataset_name, data_dir, parallelizable=True, has_maps=True, dataset_options=dataset_options)
     raise ValueError(f"Dataset with name '{dataset_name}' is not supported")
 
 

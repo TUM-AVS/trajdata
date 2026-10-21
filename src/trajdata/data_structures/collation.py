@@ -76,7 +76,7 @@ def raster_map_collate_fn_agent(
     # Getting the map patch data and preparing it for batched rotation.
     patch_size_y, patch_size_x = batch_elems[0].map_patch.data.shape[-2:]
     patch_data: Tensor = torch.empty(
-        (len(batch_elems), desired_num_channels, patch_size_y, patch_size_x)
+        (len(batch_elems), desired_num_channels, patch_size_y, patch_size_x), dtype=torch.float
     )
 
     if np.any(has_data):

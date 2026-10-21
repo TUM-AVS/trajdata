@@ -4,7 +4,6 @@ from enum import IntEnum
 import numpy as np
 import pandas as pd
 
-
 class AgentType(IntEnum):
     UNKNOWN = 0
     VEHICLE = 1
@@ -13,6 +12,7 @@ class AgentType(IntEnum):
     MOTORCYCLE = 4
     TRUCK = 5
     BUS = 6
+    BUILDING = 7
 
 
 class Extent:

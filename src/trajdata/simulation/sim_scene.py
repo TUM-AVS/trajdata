@@ -31,14 +31,6 @@ class SimulationScene:
         freeze_agents: bool = True,
         return_dict: bool = False,
     ) -> None:
-        if not freeze_agents:
-            raise NotImplementedError(
-                (
-                    "Agents that change over time (i.e., following the original dataset) "
-                    "are not handled yet internally. Please set freeze_agents=True."
-                )
-            )
-
         self.env_name: str = env_name
         self.scene_name: str = scene_name
         self.scene: Scene = deepcopy(scene)
@@ -98,18 +90,28 @@ class SimulationScene:
         new_xyzh_dict: Dict[str, StateArray],
         return_obs=True,
     ) -> Union[AgentBatch, Dict[str, Any]]:
-        self.scene_ts += 1
-
-        self.cache.append_state(new_xyzh_dict)
-
+        next_timestep = self.scene_ts + 1
         if not self.freeze_agents:
-            agents_present: List[AgentMetadata] = self.scene.agent_presence[
-                self.scene_ts
-            ]
-            self.agents: List[AgentMetadata] = filtering.agent_types(
-                agents_present, self.dataset.no_types, self.dataset.only_types
+            if next_timestep >= len(self.scene.agent_presence):
+                raise ValueError(f"Timestep {next_timestep} is outside the recorded agent presence.")
+            next_agents = filtering.agent_types(
+                self.scene.agent_presence[next_timestep],
+                self.dataset.no_types, self.dataset.only_types,
             )
+            next_names = {agent.name for agent in next_agents}
+            invalid_names = set(new_xyzh_dict) - next_names
+            if invalid_names:
+                raise ValueError(
+                    f"State overrides at timestep {next_timestep} contain absent agents: "
+                    f"{sorted(invalid_names)}"
+                )
 
+        # Only supplied state overrides are replaced. Scripted agents, including
+        # new arrivals, retain their recorded rows in the cache.
+        self.cache.append_state(new_xyzh_dict)
+        self.scene_ts = next_timestep
+        if not self.freeze_agents:
+            self.agents = next_agents
             self.scene.agent_presence[self.scene_ts] = self.agents
         else:
             self.scene.agent_presence.append(self.agents)

@@ -501,6 +501,7 @@ class NuplanDataset(RawDataset):
                 "incoming_edge_ids": sorted(edge.id for edge in map_object.incoming_edges),
                 "outgoing_edge_ids": sorted(edge.id for edge in map_object.outgoing_edges),
             }
+        #TODO: replace following by map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params) (see waymo)
         vector_map.compute_search_indices()
         maps_path, vector_path, kdtrees_path, rtrees_path, _, _ = map_cache_class.get_map_paths(
             cache_path, vector_map.env_name, vector_map.map_name, float(map_params["px_per_m"])

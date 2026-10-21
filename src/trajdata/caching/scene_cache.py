@@ -173,6 +173,21 @@ class SceneCache:
         lane_id, scene_ts -> TrafficLightStatus"""
         raise NotImplementedError()
 
+    # STATIC LANE METADATA
+    @staticmethod
+    def save_map_metadata(
+        metadata: Any, cache_path: Path, env_name: str, map_name: str,
+    ) -> None:
+        '''Save lane attributes and map-level fields from ``metadata.attrs["map_metadata"]``.'''
+        raise NotImplementedError()
+
+    def is_map_metadata_cached(self) -> bool:
+        raise NotImplementedError()
+
+    def load_map_metadata(self) -> Any:
+        """Load static lane metadata; fail if the cache is missing."""
+        raise NotImplementedError()
+
     # MAPS
     @staticmethod
     def are_maps_cached(cache_path: Path, env_name: str) -> bool:
@@ -182,6 +197,11 @@ class SceneCache:
     def is_map_cached(
         cache_path: Path, env_name: str, map_name: str, resolution: float
     ) -> bool:
+        raise NotImplementedError()
+
+    @staticmethod
+    def remove_map_cache(cache_path: Path, env_name: str, map_name: str) -> None:
+        """Remove every cached representation of one map."""
         raise NotImplementedError()
 
     @staticmethod

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict
 
 from trajdata.maps.vec_map import VectorMap
+from trajdata.maps.vec_map_elements import MapElementType
 from trajdata.proto.vectorized_map_pb2 import VectorizedMap
 from trajdata.utils import map_utils
 
@@ -33,6 +34,11 @@ class MapAPI:
     def get_map(
         self, map_id: str, scene_cache: Optional[SceneCache] = None, **kwargs
     ) -> VectorMap:
+        if scene_cache is not None:
+            scene_map_id = f"{scene_cache.scene.env_name}:{scene_cache.scene.location}"
+            if scene_map_id != map_id:
+                raise ValueError(f"Scene cache map {scene_map_id!r} does not match {map_id!r}")
+
         if map_id not in self.maps:
             env_name, map_name = map_id.split(":")
             env_maps_path: Path = self.unified_cache_path / env_name / "maps"
@@ -54,10 +60,22 @@ class MapAPI:
             vec_map = self.maps[map_id]
 
         if scene_cache is not None:
-            vec_map.associate_scene_data(
-                scene_cache.get_traffic_light_status_dict(
-                    kwargs.get("desired_dt", None)
+            desired_dt = kwargs.get("desired_dt", None)
+            if scene_cache.is_traffic_light_data_cached():
+                vec_map.associate_scene_data(
+                    scene_cache.get_traffic_light_status_dict(desired_dt)
                 )
-            )
+            else:
+                vec_map.traffic_light_status = None
+
+            if scene_cache.is_map_metadata_cached():
+                metadata = scene_cache.load_map_metadata()
+                if metadata.index.name == "lane_id":
+                    lanes = vec_map.elements[MapElementType.ROAD_LANE]
+                    for lane_id, row in metadata.iterrows():
+                        if lane_id in lanes:
+                            lanes[lane_id].metadata = row.to_dict()
+                if "map_metadata" in metadata.attrs:
+                    vec_map.metadata = metadata.attrs["map_metadata"]
 
         return vec_map

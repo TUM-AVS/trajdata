@@ -1,5 +1,6 @@
+import shutil
 from pathlib import Path
-from typing import List, NamedTuple, Union
+from typing import Dict, List, NamedTuple, Optional, Union
 
 import dill
 
@@ -76,6 +77,29 @@ class EnvCache:
         env_cache_dir.mkdir(parents=True, exist_ok=True)
         with open(env_cache_dir / "scenes_list.dill", "wb") as f:
             dill.dump(scenes_list, f)
+
+    def load_source_fingerprints(self, env_name: str) -> Optional[Dict[str, str]]:
+        """Load adapter-provided source fingerprints, if this cache has them."""
+        source = self.path / env_name / "source_fingerprints.dill"
+        if not source.is_file():
+            return None
+        with open(source, "rb") as f:
+            return dill.load(f)
+
+    def save_source_fingerprints(
+        self, env_name: str, fingerprints: Dict[str, str]
+    ) -> None:
+        """Persist per-scene source fingerprints independently of an adapter."""
+        env_cache_dir = self.path / env_name
+        env_cache_dir.mkdir(parents=True, exist_ok=True)
+        with open(env_cache_dir / "source_fingerprints.dill", "wb") as f:
+            dill.dump(fingerprints, f)
+
+    def remove_scene_cache(self, env_name: str, scene_name: str) -> None:
+        """Delete all converted artifacts for one scene, leaving other scenes intact."""
+        scene_cache_dir = self.path / env_name / scene_name
+        if scene_cache_dir.exists():
+            shutil.rmtree(scene_cache_dir)
 
     @staticmethod
     def load(scene_info_path: Union[Path, str]) -> Scene:

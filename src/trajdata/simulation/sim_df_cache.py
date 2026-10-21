@@ -79,6 +79,8 @@ class SimulationDataFrameCache(DataFrameCache, SimulationCache):
 
     def append_state(self, xyzh_dict: Dict[str, StateArray]) -> None:
         self.scene_ts += 1
+        if not xyzh_dict:
+            return
 
         sim_dict: Dict[str, List[Union[str, float, int]]] = defaultdict(list)
         prev_states: StateArray = self.get_states(
@@ -97,6 +99,7 @@ class SimulationDataFrameCache(DataFrameCache, SimulationCache):
 
             sim_dict["x"].append(new_x)
             sim_dict["y"].append(new_y)
+            sim_dict["z"].append(new_xyzh.get_attr("z").item())
 
             vx: float = (new_x - old_x) / self.scene.dt
             vy: float = (new_y - old_y) / self.scene.dt
@@ -125,11 +128,9 @@ class SimulationDataFrameCache(DataFrameCache, SimulationCache):
 
         sim_step_df = pd.DataFrame(sim_dict)
         sim_step_df.set_index(["agent_id", "scene_ts"], inplace=True)
-        if (
-            self.scene_ts < self.scene.length_timesteps
-            and self.scene_ts in self.persistent_data_df.index.get_level_values(1)
-        ):
-            self.persistent_data_df.drop(index=self.scene_ts, level=1, inplace=True)
+        # Preserve recorded rows for scripted agents and later arrivals.
+        replaced_index = self.persistent_data_df.index.intersection(sim_step_df.index)
+        self.persistent_data_df.drop(index=replaced_index, inplace=True)
 
         self.persistent_data_df = pd.concat([self.persistent_data_df, sim_step_df])
         self.persistent_data_df.sort_index(inplace=True)
