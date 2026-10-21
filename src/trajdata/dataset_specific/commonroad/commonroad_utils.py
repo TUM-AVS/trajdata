@@ -50,7 +50,8 @@ LANELET_MAX_GEOMETRY_CORRECTION_M: Final[float] = 1.0
 def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
     """Smooth road geometry jointly, without modifying the CommonRoad network.
 
-    Adjacent lanes share one boundary curve (reversed for opposing traffic).
+    Close adjacent boundaries are shared (reversed for opposing traffic).
+    Separated stretches stay independent and blend into nearby shared stretches.
     Successors share endpoint positions and forward tangents. Only metre-scale
     discrepancies are reconciled; malformed topology/geometry raises an error.
     """
@@ -114,6 +115,7 @@ def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
     boundary_members, boundary_groups = components(boundary_graph)
 
     curves, stations = {}, {}
+    partial_boundary_groups = []
     for root, members in boundary_groups.items():
         oriented = [originals[key][::boundary_members[key][1]] for key in members]
         arc_lengths = [np.r_[0., np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))]
@@ -125,8 +127,20 @@ def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
             for xy, s in zip(oriented, arc_lengths)
         ])
         curve = samples.mean(axis=0)
-        if np.max(np.linalg.norm(samples - curve, axis=-1)) > LANELET_MAX_GEOMETRY_CORRECTION_M:
-            raise ValueError(f"Reconciling adjacent lane boundaries at {root} requires more than 1 m correction")
+        corrections = np.linalg.norm(samples - curve, axis=-1).max(axis=0)
+        if np.max(corrections) > LANELET_MAX_GEOMETRY_CORRECTION_M:
+            # Adjacency can describe only a partial shared boundary, e.g. where
+            # lanes diverge. Keep separate curves rather than moving the far
+            # stretches toward each other. Reconcile nearby samples after smoothing.
+            partial_boundary_groups.append((members, corrections))
+            for key, sample in zip(members, samples):
+                direction = boundary_members[key][1]
+                boundary_members[key] = (key, direction)
+                s = np.r_[0., np.cumsum(np.linalg.norm(np.diff(sample, axis=0), axis=1))]
+                if np.any(np.diff(s) <= 1e-8):
+                    raise ValueError(f"Boundary {key} collapses or reverses")
+                curves[key], stations[key] = sample, s
+            continue
         s = np.r_[0., np.cumsum(np.linalg.norm(np.diff(curve, axis=0), axis=1))]
         if np.any(np.diff(s) <= 1e-8):
             raise ValueError(f"Shared boundary {root} collapses or reverses")
@@ -135,6 +149,12 @@ def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
     # Endpoints belong to canonical curves, so boundary sharing and successor
     # continuity are solved together rather than overwritten in separate passes.
     endpoint_graph = {(root, end): [] for root in curves for end in (0, 1)}
+    for members, corrections in partial_boundary_groups:
+        for end, index in ((0, 0), (1, -1)):
+            if 2 * corrections[index] <= LANELET_MAX_GEOMETRY_CORRECTION_M:
+                for key in members[1:]:
+                    # Each separate curve is already oriented with the group.
+                    relate(endpoint_graph, (members[0], end), (key, end), 1)
     for lane_id, lane in lanes.items():
         for successor in lane.successor:
             for name in geometry_names:
@@ -188,7 +208,7 @@ def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
             midpoints.append(np.mean(edges, axis=0))
         positions[root] = np.mean(midpoints, axis=0)
 
-    smoothed = {}
+    smoothed, smoothing_originals = {}, {}
     for root, curve in curves.items():
         s = stations[root]
         spacing = s[-1] / (len(s) - 1)
@@ -236,6 +256,50 @@ def _smooth_lanelet_geometry(lanelet_network: LaneletNetwork) -> dict:
         if np.any(np.linalg.norm(np.diff(sampled, axis=0), axis=1) <= 1e-8):
             raise ValueError(f"Smoothing lane curve {root} creates duplicate vertices")
         smoothed[root] = sampled
+        smoothing_originals[root] = original
+
+    for members, _ in partial_boundary_groups:
+        samples = [smoothed[key].copy() for key in members]
+        lines = [shapely.LineString(sample) for sample in samples]
+        for index, (key, sample) in enumerate(zip(members, samples)):
+            tangent = np.gradient(sample, axis=0)
+            norms = np.linalg.norm(tangent, axis=-1)
+            if np.any(norms <= 1e-8):
+                raise ValueError(f"Boundary {key} has a degenerate tangent")
+            tangent /= norms[:, None]
+            movement = np.zeros_like(sample)
+            total_weight = np.ones(len(sample))
+            for other_index, line in enumerate(lines):
+                if other_index == index:
+                    continue
+                # Match by physical proximity, not percentage of curve length:
+                # adjacent boundaries may cover different longitudinal extents.
+                projected = shapely.get_coordinates(shapely.line_interpolate_point(
+                    line, shapely.line_locate_point(line, shapely.points(sample)),
+                ))
+                delta = projected - sample
+                correction = np.linalg.norm(delta, axis=-1) / 2
+                transition = np.clip(2 * correction / LANELET_MAX_GEOMETRY_CORRECTION_M - 1, 0., 1.)
+                weight = 1 - transition**2 * (3 - 2 * transition)
+                # Keep the lane's longitudinal extent; do not pull short curves
+                # toward another curve's endpoint or fold a curve back on itself.
+                lateral = delta - np.sum(delta * tangent, axis=-1)[:, None] * tangent
+                movement += weight[:, None] * lateral
+                total_weight += weight
+            reconciled = sample + movement / total_weight[:, None]
+            # Preserve successor positions and their common discrete tangents.
+            for end, neighbor in ((0, 1), (-1, -2)):
+                reconciled[end] = sample[end]
+                direction = sample[neighbor] - sample[end]
+                direction /= np.linalg.norm(direction)
+                reconciled[neighbor] = sample[end] + np.linalg.norm(
+                    reconciled[neighbor] - sample[end]
+                ) * direction
+            if np.max(np.linalg.norm(reconciled - smoothing_originals[key], axis=-1)) > LANELET_MAX_GEOMETRY_CORRECTION_M:
+                raise ValueError(f"Reconciling nearby boundary stretches at {key} requires more than 1 m correction")
+            if np.any(np.linalg.norm(np.diff(reconciled, axis=0), axis=1) <= 1e-8):
+                raise ValueError(f"Reconciling nearby boundary stretches at {key} creates duplicate vertices")
+            smoothed[key] = reconciled
 
     result = {}
     for lane_id in lanes:
